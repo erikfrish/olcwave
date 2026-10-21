@@ -40,6 +40,12 @@ def patch_remnawave_users() -> None:
         if isinstance(model, type) and "uuid" in getattr(model, "model_fields", {}):
             make_uuid_optional(model)
 
+    # Remnawave 3.4.5 omits `uuid` in list responses; patch the item model
+    # directly, then rebuild the wrapper.
+    from remnawave.models.users import UserResponseDto
+    if "uuid" in UserResponseDto.model_fields:
+        make_uuid_optional(UserResponseDto)
+
     GetAllUsersResponseDto.model_rebuild(force=True)
 
 
@@ -60,14 +66,17 @@ def _get_sdk() -> RemnawaveSDK:
     global _remnawave
     if _remnawave is None:
         ca_bundle = getattr(settings, "RW_CA_BUNDLE", "") or None
+        import httpx
+
         http_client = None
         if ca_bundle:
-            import httpx
-
             http_client = httpx.AsyncClient(
                 base_url=_prepare_base_url(settings.RW_API_URL),
                 headers=_prepare_headers(settings.RW_API_TOKEN, settings.RW_API_URL),
                 verify=ca_bundle,
+                # A hung panel must surface as RemnawaveUnavailable (bounded
+                # grace), never as an indefinite request stall.
+                timeout=httpx.Timeout(10.0, connect=5.0),
             )
         _remnawave = RemnawaveSDK(
             client=http_client,
@@ -75,6 +84,10 @@ def _get_sdk() -> RemnawaveSDK:
             token=settings.RW_API_TOKEN,
             caddy_token=settings.RW_CADDY_TOKEN or None,
         )
+        if http_client is None:
+            # SDK built its own client: still bound the request deadline so
+            # a stalled panel becomes RemnawaveUnavailable, not a hang.
+            _remnawave._client.timeout = httpx.Timeout(10.0, connect=5.0)
     return _remnawave
 
 

@@ -1,4 +1,5 @@
 import asyncio
+import re
 
 from aiodocker.containers import DockerContainer
 
@@ -13,6 +14,13 @@ from olcrtc.schemas import (
 
 
 class Containers:
+    # Remnawave shortUuids on this panel are 16 chars from a crockford-ish
+    # alphabet (digits, A-Z minus I/O, a-z minus i/l/o, '-' and '_').
+    # Anything else after the tag is not a user id, so foreign containers
+    # that merely share the "olcwave-" prefix (ops tooling, isolated
+    # postgres, ...) are never treated as panel-owned and never removed.
+    SHORT_UUID_RE = re.compile(r"^[0-9A-HJ-NP-Za-hj-np-z_-]{4,32}$")
+
     @staticmethod
     async def is_panel_container(cont: DockerContainer) -> bool:
         info = await cont.show()
@@ -20,7 +28,11 @@ class Containers:
         name = info["Name"].lstrip("/")
         parts = name.split("-", 2)
 
-        return len(parts) == 3 and parts[0] == "olcwave"
+        return (
+            len(parts) == 3
+            and parts[0] == "olcwave"
+            and bool(Containers.SHORT_UUID_RE.fullmatch(parts[2]))
+        )
 
     @staticmethod
     async def to_schema(cont: DockerContainer) -> ContainerSchema | None:

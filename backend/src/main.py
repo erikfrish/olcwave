@@ -5,23 +5,27 @@
 import asyncio
 import logging
 
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s %(levelname)s %(name)s: %(message)s",
+)
+
 from aiodocker import DockerError
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 
 import uvicorn
 
-from subscriptions.router import router as subscriptions_router
-from olcrtc.router import router as containers_router
-from routing.router import router as routing_router
-from rw.reconcile import ReconcileManager
-from settings.router import router as settings_router
 from auth.router import router as auth_router
 from profiles.router import router as configs_router
 from users.router import router as users_router
 from subscriptions.router import router as subscriptions_router
 from olcrtc.router import router as containers_router
 from routing.router import router as routing_router
+from routing.service import Routing
+from settings.router import router as settings_router
+from settings.service import SettingsService
+from rw.reconcile import ReconcileManager
 from xraycore.sdk import XrayCore
 from config import settings
 from database import create_tables
@@ -53,6 +57,7 @@ async def lifespan(app: FastAPI):
         SyncManager.start()
         ReconcileManager.start()
 
+    traffic_task = asyncio.create_task(TrafficManager.run())
     yield
 
     traffic_task.cancel()

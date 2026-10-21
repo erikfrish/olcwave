@@ -66,16 +66,19 @@ class ReconcileManager:
         Serializes with the subscription path's per-user lock so a revocation
         can't interleave with container creation for the same user.
         """
-        from subscriptions.service import _lock_for
+        from subscriptions.service import acquire_user_lock, release_user_lock
 
         removed = 0
-        async with _lock_for(short_uuid):
+        await acquire_user_lock(short_uuid)
+        try:
             for name in await ReconcileManager.owned_container_names(short_uuid):
                 try:
                     await OlcRTC.remove(name)
                     removed += 1
                 except Exception:
                     logger.exception("revoke: failed to remove container %s", name)
+        finally:
+            release_user_lock(short_uuid)
         if removed:
             logger.warning(
                 "revocation: removed %d container(s) of %s (reason=%s)",

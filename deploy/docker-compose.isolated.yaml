@@ -1,0 +1,53 @@
+# Isolated OLCWave stack for the dedicated rootless daemon.
+#   export DOCKER_HOST=unix:///run/user/1000/olcwave-docker.sock
+#   docker compose -f deploy/docker-compose.isolated.yaml -p olcwave-iso up -d
+# Loopback-only publish; no docker socket inside any container; the olcrtc
+# image is preloaded (docker load deploy/olcrtc-image.tar) because the
+# rootless daemon builds images but can't run them (devpts gid=5 mapping).
+services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: olcwave-iso-postgres
+    restart: unless-stopped
+    env_file: ./backend.env
+    environment:
+      PGDATA: /var/lib/postgresql/data/pgdata
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $$POSTGRES_USER -d $$POSTGRES_DB"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+
+  api:
+    image: localhost/olcwave-api:pinned
+    build:
+      context: ../backend
+      dockerfile: Dockerfile
+    container_name: olcwave-iso-api
+    restart: unless-stopped
+    env_file: ./backend.env
+    environment:
+      DOCKER_HOST: unix:///run/olcwave-docker.sock
+    ports:
+      - "127.0.0.1:18000:8000"
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+  # socat proxy: exposes the HOST rootless daemon socket to the api container
+  # through a unix socket in a shared volume - the container never talks to
+  # the production /var/run/docker.sock, only to the dedicated rootless one.
+  dockersock-proxy:
+    image: alpine/socat:latest
+    container_name: olcwave-iso-dockersock
+    restart: unless-stopped
+    volumes:
+      - sockdir:/share
+      - /run/user/1000/olcwave-docker.sock:/host/olcwave-docker.sock:ro
+    command: UNIX-LISTEN:/share/olcwave-docker.sock,fork,mode=660 UNIX-CONNECT:/host/olcwave-docker.sock
+
+volumes:
+  pgdata:
+  sockdir:

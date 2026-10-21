@@ -15,7 +15,11 @@ class TrafficManager:
     def _owner_of(name: str) -> str | None:
         parts = name.split("-", 2)
 
-        if len(parts) == 3 and parts[0] == "olcwave":
+        if (
+            len(parts) == 3
+            and parts[0] == "olcwave"
+            and Containers.SHORT_UUID_RE.fullmatch(parts[2])
+        ):
             return parts[2]
 
         return None

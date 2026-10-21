@@ -4,6 +4,7 @@ class Settings(BaseSettings):
     RW_ENABLED: bool 
     RW_API_TOKEN: str = ""
     RW_API_URL: str = ""
+    RW_CADDY_TOKEN: str = ""
     # Optional custom CA bundle for the Remnawave API client (PEM file path).
     # Empty = system trust store.
     RW_CA_BUNDLE: str = ""

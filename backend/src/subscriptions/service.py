@@ -22,6 +22,10 @@ from rw.sdk import isUserValid, RemnawaveUnavailable
 _profile_locks: dict[str, asyncio.Lock] = {}
 
 
+_profile_locks: dict[str, asyncio.Lock] = {}
+_profile_locks_held: set[tuple[int, str]] = set()
+
+
 def _lock_for(short_uuid: str) -> asyncio.Lock:
     lock = _profile_locks.get(short_uuid)
     if lock is None:
@@ -30,12 +34,45 @@ def _lock_for(short_uuid: str) -> asyncio.Lock:
     return lock
 
 
+def _lock_key(short_uuid: str) -> tuple[int, str]:
+    return (id(asyncio.current_task()), short_uuid)
+
+
+async def acquire_user_lock(short_uuid: str) -> None:
+    """Reentrancy-safe per-user lock.
+
+    revoke_local holds the lock and delegates to ReconcileManager.revoke_user,
+    which takes the same lock to serialize against the reconciler. A plain
+    asyncio.Lock is not reentrant, so that nesting deadlocked the event loop;
+    the held-set makes the nested acquire a no-op for the same task.
+    """
+    key = _lock_key(short_uuid)
+    if key in _profile_locks_held:
+        return
+    await _lock_for(short_uuid).acquire()
+    _profile_locks_held.add(key)
+
+
+def release_user_lock(short_uuid: str) -> None:
+    key = _lock_key(short_uuid)
+    if key not in _profile_locks_held:
+        return
+    _profile_locks_held.discard(key)
+    lock = _lock_for(short_uuid)
+    if not lock.locked():
+        return
+    lock.release()
+
+
 async def ensure_profiles_running_locked(short_uuid: str):
     """Serialize ensure_profiles_running per user: concurrent subscription
     requests (or a request racing the reconciler) must not double-create
     the same container."""
-    async with _lock_for(short_uuid):
+    await acquire_user_lock(short_uuid)
+    try:
         return await Subscriptions.ensure_profiles_running(short_uuid)
+    finally:
+        release_user_lock(short_uuid)
 
 
 TRANSPORT_NAMES = {
@@ -416,8 +453,11 @@ class Subscriptions:
         concurrent deny is removing.
         """
         try:
-            async with _lock_for(short_uuid):
+            await acquire_user_lock(short_uuid)
+            try:
                 await ReconcileManager.revoke_user(short_uuid, "subscription_denied")
+            finally:
+                release_user_lock(short_uuid)
         except Exception:
             logging.getLogger(__name__).exception(
                 "revocation of %s failed", short_uuid
