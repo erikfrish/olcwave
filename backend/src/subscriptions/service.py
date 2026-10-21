@@ -409,9 +409,15 @@ class Subscriptions:
 
     @staticmethod
     async def revoke_local(short_uuid: str):
-        """Stop and remove only this user's olcwave containers (owned set)."""
+        """Stop and remove only this user's olcwave containers (owned set).
+
+        Takes the same per-user lock as ensure: a subscription request that
+        is mid-way through creating containers can never resurrect one a
+        concurrent deny is removing.
+        """
         try:
-            await ReconcileManager.revoke_user(short_uuid, "subscription_denied")
+            async with _lock_for(short_uuid):
+                await ReconcileManager.revoke_user(short_uuid, "subscription_denied")
         except Exception:
             logging.getLogger(__name__).exception(
                 "revocation of %s failed", short_uuid

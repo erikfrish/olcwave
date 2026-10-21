@@ -61,14 +61,21 @@ class ReconcileManager:
 
     @staticmethod
     async def revoke_user(short_uuid: str, reason: str) -> int:
-        """Remove every olcwave container owned by short_uuid. Returns count."""
+        """Remove every olcwave container owned by short_uuid. Returns count.
+
+        Serializes with the subscription path's per-user lock so a revocation
+        can't interleave with container creation for the same user.
+        """
+        from subscriptions.service import _lock_for
+
         removed = 0
-        for name in await ReconcileManager.owned_container_names(short_uuid):
-            try:
-                await OlcRTC.remove(name)
-                removed += 1
-            except Exception:
-                logger.exception("revoke: failed to remove container %s", name)
+        async with _lock_for(short_uuid):
+            for name in await ReconcileManager.owned_container_names(short_uuid):
+                try:
+                    await OlcRTC.remove(name)
+                    removed += 1
+                except Exception:
+                    logger.exception("revoke: failed to remove container %s", name)
         if removed:
             logger.warning(
                 "revocation: removed %d container(s) of %s (reason=%s)",
