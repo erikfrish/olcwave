@@ -2,20 +2,20 @@
 # This file is part of olcwave.
 # OLCWave is free software licensed under AGPL-3.0.
 #
-# Access policy for Remnawave-backed users.
-#
 # A Remnawave user grants access to OLCWave subscriptions only when ALL of:
 #   - the subscription lookup is found,
 #   - status == ACTIVE (DISABLED is denied),
 #   - expire_at is in the future (at evaluation time),
-#   - sub_revoked_at is None (a revoked subscription is denied),
 #   - the user belongs to RW_SQUAD_NAME when a squad is configured.
 #
-# Deny decisions are facts: they are returned even when the local DB row is
-# missing or the subscription endpoint cannot answer. Fail-closed: if
-# Remnawave cannot be reached at all, the user is treated as not verified and
-# existing access is revoked after REMNAWAVE_UNAVAILABLE_GRACE_SECONDS of
-# continuous failure, never kept indefinitely.
+# sub_revoked_at is a credential-rotation marker, NOT a permanent ban:
+# Remnawave's revoke action rotates the shortUuid (or passwords) and the
+# user's CURRENT link keeps working while old links 404 at Remnawave itself.
+# OLCWave therefore denies on the old short_uuid only because Remnawave
+# no longer resolves it (not_found), and the rotation event invalidates the
+# old cached olcrtc credentials: the reconciler removes containers for the
+# old owner id; the valid user gets fresh containers/keys under the new
+# short_uuid on the next subscription fetch.
 
 import logging
 from dataclasses import dataclass
@@ -79,9 +79,13 @@ def evaluate_user(user) -> RwAccess:
     if expire_at is None or expire_at <= now:
         return RwAccess(short_uuid, False, REASON_EXPIRED, user.username, expire_at, status, user.sub_revoked_at)
 
+    # sub_revoked_at is recorded but never denied on by itself: Remnawave's
+    # revoke action is a credential rotation (old shortUuid stops resolving
+    # at Remnawave; a new current link works). Denial of an old link comes
+    # from Remnawave returning not_found for it; the rotation event makes
+    # the reconciler drop the old olcrtc containers so stale cached keys
+    # die, while the valid user re-provisions under the new short_uuid.
     revoked_at = _aware(user.sub_revoked_at)
-    if revoked_at is not None:
-        return RwAccess(short_uuid, False, REASON_REVOKED, user.username, expire_at, status, revoked_at)
 
     if not is_user_in_squad(user):
         return RwAccess(short_uuid, False, REASON_SQUAD, user.username, expire_at, status, revoked_at)

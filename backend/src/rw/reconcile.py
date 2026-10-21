@@ -6,16 +6,18 @@
 #
 # Every REVOCATION_CHECK_INTERVAL seconds each user with running olcwave
 # containers is re-evaluated against the Remnawave user record. On a definite
-# deny (missing, disabled, expired, revoked, squad-removed) every olcwave
-# container owned by that short_uuid is REMOVED immediately - the config with
-# the crypto key never keeps running. On Remnawave outage a bounded grace
-# window applies (REMNAWAVE_UNAVAILABLE_GRACE_SECONDS since the last
-# successful evaluation); past the window containers are removed too, so no
-# indefinite stale access exists. Valid users are never touched: reconcile
-# only removes, it never restarts or re-creates.
-#
-# Startup reconciliation runs the same sweep once before the API accepts
-# traffic, so containers restored by a crash/upgrade get evaluated too.
+# deny (missing, disabled, expired, squad-removed) every olcwave container
+# owned by that short_uuid is REMOVED immediately - the config with the
+# crypto key never keeps running. A subscription revoke in Remnawave rotates
+# credentials: the old shortUuid stops resolving there (not_found -> removed
+# here), and a revoke-with-kept-shortUuid is caught by the sub_revoked_at
+# generation watcher below - the rotation event removes this user's
+# containers once, so cached old olcrtc keys die while the still-valid user
+# re-provisions fresh keys on the next subscription fetch. On Remnawave
+# outage a bounded grace window applies (REMNAWAVE_UNAVAILABLE_GRACE_SECONDS
+# since the last successful evaluation); past the window containers are
+# removed too, so no indefinite stale access exists. Valid users are never
+# touched between rotations: reconcile only removes, never restarts.
 
 import asyncio
 import logging
@@ -39,6 +41,10 @@ class ReconcileManager:
 
     # short_uuid -> monotonic deadline of the outage grace window
     _grace_deadline: dict[str, float] = {}
+
+    # short_uuid -> last seen sub_revoked_at epoch (credential generation)
+    _seen_revoke_gen: dict[str, float] = {}
+
 
     @staticmethod
     async def owned_container_names(short_uuid: str) -> list[str]:
@@ -130,6 +136,21 @@ class ReconcileManager:
             await ReconcileManager.revoke_user(short_uuid, "remnawave_unreachable_past_grace")
             ReconcileManager._grace_deadline.pop(short_uuid, None)
             return "revoked"
+
+        # Credential-rotation watcher: Remnawave's revoke action stamps
+        # sub_revoked_at. Whether it rotated the shortUuid (old link 404s ->
+        # denied as not_found above via a later sweep) or kept it, the
+        # rotation itself invalidates every olcrtc key this panel issued
+        # before it. Remove this user's containers once per generation so
+        # cached old credentials die; the valid user re-provisions fresh
+        # keys/containers on their next subscription fetch (recovery works).
+        if access.sub_revoked_at is not None:
+            gen = access.sub_revoked_at.timestamp()
+            if ReconcileManager._seen_revoke_gen.get(short_uuid, 0) < gen:
+                ReconcileManager._seen_revoke_gen[short_uuid] = gen
+                await ReconcileManager.revoke_user(short_uuid, "subscription_revoked_rotation")
+                ReconcileManager._grace_deadline.pop(short_uuid, None)
+                return "revoked"
 
         if access.allowed:
             return "allowed"

@@ -53,6 +53,8 @@ class RemnawaveUnavailable(RuntimeError):
         super().__init__(detail)
 
 
+_remnawave: RemnawaveSDK | None = None
+
 
 def _get_sdk() -> RemnawaveSDK:
     global _remnawave
