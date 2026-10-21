@@ -37,6 +37,15 @@ from docker_client import init_docker, close_docker
 async def lifespan(app: FastAPI):
     await create_tables()
     await init_docker()
+    # Parse OLCWAVE_NODES_JSON fail-fast: invalid JSON, a non-object
+    # payload, a node without docker_url or duplicate tags abort startup -
+    # a malformed node config must never silently degrade to local-only.
+    # Empty env = single-node mode. Then pre-open per-node daemon clients
+    # (local Unix sockets only, no remote TCP).
+    from olcrtc import nodes
+    nodes.reset_cache()
+    for node_name in nodes.names():
+        nodes.client(node_name)
     await SettingsService.load()
 
     try:

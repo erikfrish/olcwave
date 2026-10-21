@@ -48,8 +48,11 @@ async def get(short_uuid: str, request: Request):
     if sub.status_code == 200 and "ghostlane" in request.headers.get("user-agent", "").lower():
         lines = [line for line in sub.body.decode().splitlines()
                  if line.startswith(("olcrtc://", "vless://", "hysteria2://"))]
+        headers = dict(sub.headers)
+        headers.pop("content-length", None)
+        headers.update({"Cache-Control": "private, no-store", "Vary": "User-Agent"})
         return Response(content="\n".join(lines) + "\n", media_type="text/plain",
-                        headers={"Cache-Control": "private, no-store", "Vary": "User-Agent"})
+                        headers=headers)
     sub.headers["Cache-Control"] = "private, no-store"
     sub.headers["Vary"] = "User-Agent"
     return sub

@@ -190,6 +190,11 @@ Ghostlane 1.0.466 CLI, real HTTPS, GUI disable/enable/expiry/squad removal,
 full and password-only revoke, restart stability and bounded panel outage
 were exercised there. The Ghostlane desktop/mobile GUI was not exercised.
 
+Production controller and three isolated VPS execution nodes are now deployed:
+see [production operations and observed proofs](../deploy/PRODUCTION.md).
+The limited erikfrish Ghostlane identity is separate from the existing main
+VLESS/AWG account. Quota is aggregate Ghostlane-only, not combined VPN billing.
+
 
 ## Evidence paths (raw artifacts of each proof row)
 

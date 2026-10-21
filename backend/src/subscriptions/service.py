@@ -11,7 +11,6 @@ from fastapi import Response
 from config import settings
 from settings.service import SettingsService
 from users.schemas import TrafficInfoSchema, UserSchema
-from olcrtc.sdk import OlcRTC
 from profiles.roomGenerator import RoomChecker, RoomGenerator
 from profiles.service import Containers
 from profiles.service import Profiles
@@ -181,19 +180,23 @@ class Subscriptions:
             f"@{cfg['room']['id']}#"
             f"{cfg['crypto']['key']}${name}"
         )
-
     @staticmethod
     async def get_launched_tags(short_uuid: str):
-        servers = []
+        """Tags of the user's panel containers on EVERY node.
 
-        for srv in await OlcRTC.all():
-            info = await srv.show()
+        Returns (tag, handle) pairs: the handle carries the source node, so
+        config reads and removals below hit the SAME daemon - remote
+        containers are served/revoked exactly like local ones.
+        """
+        launched = []
+        handles, _node_errors = await Containers.panel_containers(short_uuid)
+        for handle in handles:
+            info = await handle.show()
             parsed = Containers.parse_panel_labels(info)
-
             if parsed is not None and parsed[1] == short_uuid:
-                servers.append(parsed[0])
+                launched.append((parsed[0], handle))
 
-        return servers
+        return launched
 
     @staticmethod
     def prepare_sub_text(
@@ -284,30 +287,20 @@ class Subscriptions:
     @staticmethod
     async def ensure_profiles_running(short_uuid: str):
 
-        running_tags = await Subscriptions.get_launched_tags(
-            short_uuid
-        )
+        # (tag, handle) pairs across ALL nodes; handle routes every follow-up
+        # call to the daemon the container actually lives on.
+        running = await Subscriptions.get_launched_tags(short_uuid)
 
-        async def load_config(tag):
-
-            container_name = (
-                f"olcwave-{tag}-{short_uuid}"
-            )
-
-            config = await OlcRTC.get_config(
-                container_name
-            )
-
-            if isinstance(config, bytes):
-                config = config.decode()
-
-            return tag, config
+        async def load_config(handle):
+            config = await Containers.get_config_of(handle)
+            return handle, config
 
         loaded = await asyncio.gather(
-            *(load_config(tag) for tag in running_tags)
+            *(load_config(handle) for _, handle in running)
         )
 
-        configs = dict(loaded)
+        configs = {tag: cfg for (tag, _), (_, cfg) in zip(running, loaded)}
+        handles = {tag: handle for tag, handle in running}
 
         async def check_profile(tag, config):
 
@@ -324,9 +317,8 @@ class Subscriptions:
                 )
 
                 if not exists:
-                    await OlcRTC.remove(
-                        f"olcwave-{tag}-{short_uuid}"
-                    )
+                    # Remove on the SAME node the handle was found on.
+                    await Containers.remove_handle(handles[tag])
 
         await asyncio.gather(
             *(check_profile(tag, cfg)
@@ -459,6 +451,14 @@ class Subscriptions:
                 traffic.limit,
             ),
             media_type="text/plain",
+            headers={
+                "profile-title": SettingsService.get().sub_name,
+                "subscription-userinfo": (
+                    f"upload=0; download={traffic.used}; total={traffic.limit}; "
+                    f"expire={int((await Users.get(short_uuid)).expires_at.timestamp())}"
+                ),
+                "profile-update-interval": "1",
+            },
         )
 
     @staticmethod
@@ -469,20 +469,18 @@ class Subscriptions:
         cached state may be served, but no container is ever created or
         replaced while the panel cannot confirm access.
         """
-        running_tags = await Subscriptions.get_launched_tags(short_uuid)
+        # (tag, handle) pairs across ALL nodes; configs are read on each
+        # handle's own daemon. Read-only: nothing is created or replaced.
+        running = await Subscriptions.get_launched_tags(short_uuid)
 
-        async def load_config(tag):
-            config = await OlcRTC.get_config(
-                f"olcwave-{tag}-{short_uuid}"
-            )
-            if isinstance(config, bytes):
-                config = config.decode()
-            return tag, config
+        async def load_config(handle):
+            config = await Containers.get_config_of(handle)
+            return handle, config
 
         loaded = await asyncio.gather(
-            *(load_config(tag) for tag in running_tags)
+            *(load_config(handle) for _, handle in running)
         )
-        configs = dict(loaded)
+        configs = {tag: cfg for (tag, _), (_, cfg) in zip(running, loaded)}
 
         profiles_list = await Profiles.get_all()
         profiles = {

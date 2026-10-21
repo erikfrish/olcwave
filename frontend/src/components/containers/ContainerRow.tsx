@@ -91,6 +91,12 @@ export default function ContainerRow({
         <Td>
           <code className="font-mono text-accent">{container.config_tag}</code>
         </Td>
+        {/* 2b. Node (multi-node: source daemon of this container) */}
+        {container.node && (
+          <Td>
+            <code className="font-mono text-xs text-text-muted">{container.node}</code>
+          </Td>
+        )}
         {/* 3. Created */}
         <Td className="text-text-secondary whitespace-nowrap">
           {created.toLocaleDateString()} {created.toLocaleTimeString()}

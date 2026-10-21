@@ -4,7 +4,7 @@ from datetime import datetime, timezone
 from config import settings
 from settings.service import SettingsService
 from database import async_session_factory
-from users.db import UserDB
+from users.db import TrafficCursorDB, UserDB
 from users.schemas import UserSchema, TrafficInfoSchema
 
 class Users:
@@ -42,6 +42,10 @@ class Users:
         try:
             async with async_session_factory() as db:
                 _ = await UserDB.delete(db, short_uuid)
+                # Durable per-container baselines die with the user row -
+                # a later re-creation of the same short_uuid must start a
+                # fresh accounting window, not inherit stale cursors.
+                await TrafficCursorDB.delete_owner_cursors(db, short_uuid)
 
             from olcrtc.service import Containers
             await Containers.remove_all_by_short_uuid(short_uuid)
@@ -76,8 +80,13 @@ class Users:
 
     @staticmethod
     async def reset_traffic(short_uuid: str):
-        async with async_session_factory() as db:
-            await UserDB.reset_traffic(db, short_uuid)
+        # TrafficManager.reset_user_accounting takes the SAME per-user
+        # critical section as provisioning/revocation/accounting and
+        # rebases every observable baseline to its current total in one
+        # transaction: no half-reset state, no double-counted history.
+        from traffic import TrafficManager
+
+        await TrafficManager.reset_user_accounting(short_uuid)
 
     @staticmethod
     async def add_traffic_used(short_uuid: str, delta: int):

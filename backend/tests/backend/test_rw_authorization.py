@@ -89,10 +89,10 @@ def fake_docker(monkeypatch):
 
     from olcrtc import sdk as olcrtc_sdk
 
-    async def all_containers(include_stopped=False):
-        return fd.containers
+    async def all_containers(include_stopped=False, node="local"):
+        return fd.containers if node == "local" else []
 
-    async def remove(name):
+    async def remove(name, node="local"):
         for c in fd.containers:
             if c._info["Name"].lstrip("/") == name:
                 c.removed = True
@@ -194,7 +194,7 @@ def panel_env(monkeypatch, fake_docker, fake_access, no_db):
 
     configs: dict[str, str] = {}  # container name -> stored config yaml
 
-    async def fake_get_config(name):
+    async def fake_get_config(name, node="local"):
         if name not in configs:
             raise RuntimeError(f"no stored config for {name}")
         return configs[name]
@@ -581,7 +581,7 @@ async def test_reconciler_outage_no_mutation_then_past_grace_revoke(
     fake_access.error = unavailable("down")
     fake_access.decision = None
 
-    async def forbid_remove(name):
+    async def forbid_remove(name, node="local"):
         raise AssertionError(f"removal attempted within grace: {name}")
 
     real_remove = rec.OlcRTC.remove
@@ -649,7 +649,7 @@ async def test_failed_rotation_removal_is_not_marked_applied(
     real_remove = rec.OlcRTC.remove
     failures = {"n": 0}
 
-    async def flaky_remove(name):
+    async def flaky_remove(name, node="local"):
         if failures["n"] == 0:
             failures["n"] += 1
             raise RuntimeError("docker daemon hiccup")
@@ -705,7 +705,7 @@ async def test_unmarked_prefix_containers_never_owned(fake_docker):
     fake_docker.add_unmarked("olcwave-iso-postgres", created=time.time())
     fake_docker.add_unmarked("olcwave-anything", created=time.time())
 
-    owned = await rec.panel_owned_containers()
+    owned, node_errors = await rec.panel_owned_containers()
     assert owned == [], "unmarked containers must never be classified as panel-owned"
 
     removed = await rec.revoke_user_unchecked("iso-postgres", "test")
@@ -720,10 +720,10 @@ async def test_owner_length_not_assumed(fake_docker):
     for owner in ("a", "abc12", "u" * 16, "u" * 40):
         fake_docker.add(f"olcwave-jitsi-{owner}", "jitsi", owner, created=1.0)
 
-    owned = await rec.panel_owned_containers()
+    owned, node_errors = await rec.panel_owned_containers()
     assert len(owned) == 4, "owners of any length must be classified by label"
 
-    short = await rec.panel_owned_containers("a")
+    short, _ = await rec.panel_owned_containers("a")
     assert len(short) == 1
 
 

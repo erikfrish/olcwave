@@ -29,8 +29,22 @@ export interface Profile {
   profile: string
 }
 
+export interface NodeStatus {
+  node: string
+  ok: boolean
+  error?: string | null
+  containers: number
+}
+
+export interface ContainersList {
+  nodes: NodeStatus[]
+  containers: Container[]
+}
+
 export interface Container {
   id: string
+  full_id?: string
+  node?: string
   name: string
   short_uuid: string
   config_tag: string
@@ -42,6 +56,8 @@ export interface Container {
 
 export interface ContainerStats {
   name: string
+  node?: string
+  container_id?: string
   upload_bytes: number
   download_bytes: number
   total_bytes: number

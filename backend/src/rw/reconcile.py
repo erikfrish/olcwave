@@ -38,13 +38,16 @@ from rw.sdk import RemnawaveUnavailable
 from olcrtc.sdk import OlcRTC
 from olcrtc.service import Containers
 
+
 logger = logging.getLogger(__name__)
 
 
 
 
-async def panel_owned_containers(short_uuid: str | None = None) -> list:
-    """Panel-managed containers, decided by management LABELS.
+async def panel_owned_containers(
+    short_uuid: str | None = None,
+) -> tuple[list, list[str]]:
+    """Panel-managed containers across ALL nodes, decided by LABELS.
 
     A container counts as panel-owned only when it carries
     `olcwave.managed=true` plus a non-empty `olcwave.config_tag` and a
@@ -55,18 +58,27 @@ async def panel_owned_containers(short_uuid: str | None = None) -> list:
     length). Unmarked containers are NEVER classified by name, so foreign
     containers that merely share the `olcwave-` prefix (ops tooling, an
     isolated postgres) can never be touched.
+
+    Nodes are swept INDEPENDENTLY: a dead daemon degrades only its own
+    contribution - active nodes still yield their handles. Returns
+    (handles, node_errors); node_errors has one entry per unreachable node
+    so callers can fail-closed on a partial view when their invariant
+    requires completeness.
     """
     owned = []
-    for cont in await OlcRTC.all(True):
-        info = await cont.show()
-        parsed = Containers.parse_panel_labels(info)
+    handles, node_errors = await Containers.panel_containers(short_uuid)
+    for handle in handles:
+        parsed = Containers.parse_panel_labels(await handle.show())
         if parsed is None:
             continue
-        owner = parsed[1]
-        if short_uuid is not None and owner != short_uuid:
+        if short_uuid is not None and parsed[1] != short_uuid:
             continue
-        owned.append(cont)
-    return owned
+        owned.append(handle)
+    return owned, node_errors
+
+
+class NodePartialError(RuntimeError):
+    """A node sweep/removal was partial: reachable part done, rest errored."""
 
 
 async def revoke_user_unchecked(short_uuid: str, reason: str) -> int:
@@ -74,21 +86,40 @@ async def revoke_user_unchecked(short_uuid: str, reason: str) -> int:
 
     MUST be called while holding the per-user lock for short_uuid
     (subscriptions.service.acquire_user_lock). Returns the removed count.
+
+    Per-node isolation: active nodes are revoked even when a sibling node
+    is unreachable. But a revoke is COMPLETE only when every node was
+    reachable AND every removal succeeded - otherwise NodePartialError is
+    raised (after removing everything reachable) so the caller's sweep
+    logs it and the next sweep retries. Removal failures are NEVER
+    swallowed: access must not look revoked while containers still run.
     """
+    handles, node_errors = await panel_owned_containers(short_uuid)
     removed = 0
-    for cont in await panel_owned_containers(short_uuid):
-        name = (await cont.show())["Name"].lstrip("/")
+    removal_errors: list[str] = []
+    for handle in handles:
         try:
-            await OlcRTC.remove(name)
+            await Containers.remove_handle(handle)
             removed += 1
-        except Exception:
-            logger.exception("revoke: failed to remove container %s", name)
+        except Exception as exc:  # noqa: BLE001 - collect, then fail
+            removal_errors.append(f"{handle.node}:{handle.name}: {exc}")
+            logger.exception(
+                "revoke: failed to remove container %s on node %s",
+                handle.name, handle.node,
+            )
     if removed:
         logger.warning(
             "revocation: removed %d container(s) of %s (reason=%s)",
             removed, short_uuid, reason,
         )
+    if node_errors or removal_errors:
+        raise NodePartialError(
+            f"revocation of {short_uuid} incomplete ({reason}): "
+            f"removed={removed}; node errors: {node_errors or 'none'}; "
+            f"removal errors: {removal_errors or 'none'}"
+        )
     return removed
+
 
 
 class ReconcileManager:
@@ -123,9 +154,18 @@ class ReconcileManager:
     async def reconcile_once() -> dict:
         """One sweep over all users owning panel containers."""
         owners: set[str] = set()
-        for cont in await panel_owned_containers():
-            info = await cont.show()
+        handles, node_errors = await panel_owned_containers()
+        for handle in handles:
+            info = await handle.show()
             owners.add(Containers.parse_panel_labels(info)[1])
+        if node_errors:
+            # Some nodes were unreachable: the owner set may be incomplete.
+            # Log loudly; the next sweep re-collects. Evaluation of the
+            # owners we DID see proceeds (fail-forward, no fabricated data).
+            logger.warning(
+                "reconcile: node errors during owner collection: %s",
+                node_errors,
+            )
 
         result = {
             "checked": 0,
@@ -203,23 +243,31 @@ class ReconcileManager:
         and the next sweep retries the same generation. A container created
         AFTER the rotation (fresh keys) is never touched.
         """
+        handles, node_errors = await panel_owned_containers(short_uuid)
+        if node_errors:
+            # An unreachable node may still hold old-generation containers:
+            # the generation must NOT be persisted - the next sweep retries
+            # after collecting the partial view.
+            raise NodePartialError(
+                f"rotation {reason} for {short_uuid}: nodes unreachable, "
+                f"generation NOT applied - will retry: {node_errors}"
+            )
         errors: list[str] = []
-        for cont in await panel_owned_containers(short_uuid):
-            info = await cont.show()
+        for handle in handles:
+            info = await handle.show()
             parsed = Containers.parse_panel_labels(info)
             if parsed is None:
                 continue
-            name = info["Name"].lstrip("/")
             created_epoch = Containers.created_epoch(info)
             if created_epoch >= gen:
                 continue  # fresh post-rotation issuance: keep
             try:
-                await OlcRTC.remove(name)
+                await Containers.remove_handle(handle)
             except Exception as e:
-                errors.append(f"{name}: {e}")
+                errors.append(f"{handle.node}:{handle.name}: {e}")
                 logger.exception(
-                    "rotation: failed to remove old-generation container %s",
-                    name,
+                    "rotation: failed to remove old-generation container %s on %s",
+                    handle.name, handle.node,
                 )
         if errors:
             raise RuntimeError(
