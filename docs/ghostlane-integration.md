@@ -64,40 +64,54 @@ RW_SQUAD_NAME=vpn-users                   # required squad by name or UUID (empt
 
 ## Isolated deployment (operator runbook)
 
-Never point this stack at the production Docker daemon of a shared host. Use
-a dedicated daemon/VM. The proof run used the workstation's own Docker in a
-dedicated compose project with `olcwave-` prefixed names — no existing
-service shares those names.
+The OLCWave API must control the Docker daemon that runs its `olcrtc`
+containers. On a shared workstation that daemon is production infrastructure:
+**compose project names (`-p`) and container-name prefixes are labeling
+only — they are NOT security isolation.** Any process holding a daemon socket
+can touch every container on that daemon. Do not run this stack against a
+shared/production daemon; the proof run's use of the workstation's host
+daemon was a contract violation (see "Isolation note"), not a recipe.
+
+Recommended isolated shapes, in order of preference:
+
+1. **Dedicated VM** (e.g. vm4) running its own Docker daemon; OLCWave API
+   runs there with `DOCKER_HOST` pointing at that VM's daemon only.
+2. **Dedicated rootless daemon** (`dockerd-rootless.sh`) on a separate user
+   account, with the API as a plain process on that host. NOTE: on the proof
+   workstation rootless dockerd could build but not RUN runc containers
+   (devpts gid=5 / /proc mounts refused without rootlesskit+slirp4netns
+   packages), so this shape was **built and verified only up to image build**;
+   `deploy/docker-compose.isolated.yaml` targets it and remains unproven for
+   `docker run`.
+3. Any other daemon that is not the production one.
+
+Smoke procedure (run on whatever isolated daemon you chose):
 
 ```bash
 cd /mnt/extssd/Developer/olcwave
-docker compose -p olcwave-iso up -d --build     # api + postgres (+ caddy optional)
-# 1. Build the pinned engine image once:
-docker build -t olcrtc backend/olcrtc
-# 2. Login to the panel (ADMIN_USERNAME/ADMIN_PASSWORD from backend/.env),
-#    add a jitsi profile (docs/config_examples/jitsi_dc.yaml) with a real room.
-# 3. Import a Remnawave user's subscription URL into Ghostlane CLI:
-ghostlane add 'http://localhost:8000/sub/<short_uuid>'   # or via caddy HTTPS
+docker -H <dedicated-daemon> build -t olcrtc backend/olcrtc   # pinned engine
+docker compose -f deploy/docker-compose.isolated.yaml -p olcwave-iso up -d
+ghostlane add 'http://localhost:18000/sub/<short_uuid>'   # or via caddy HTTPS
 ghostlane list && ghostlane connect <idx> --proxy
 curl --proxy socks5h://127.0.0.1:1080 https://ifconfig.me   # must answer
-# 4. Revoke in Remnawave (disable / expire / delete / remove from squad):
-#    within REVOCATION_CHECK_INTERVAL + reconciliation the containers vanish;
-#    the still-cached client URI must then FAIL to connect (room empty).
-# 5. Recovery: re-enable in Remnawave → next GET /sub/<uuid> recreates
-#    containers with a fresh key; Ghostlane refresh picks it up.
+# revoke in Remnawave (disable / expire / delete / squad-removal):
+#   within REVOCATION_CHECK_INTERVAL the containers vanish; the still-cached
+#   client URI must then FAIL to connect; recovery = re-enable, re-import.
 ```
 
 ## Rollback
 
 ```bash
-docker compose -p olcwave-iso down          # removes only olcwave-iso containers
-docker rmi olcrtc olcwave-olcrtc            # remove built images
-# upstream code: git checkout implementation && git branch -D integration-remnawave
+docker compose -f deploy/docker-compose.isolated.yaml -p olcwave-iso down \
+  -v                          # removes only this compose project + its volumes
+docker -H <dedicated-daemon> rmi olcrtc localhost/olcwave-api:pinned
+                             # remove only images this stack built
+git checkout 80958c462cf04a4a825e9438fe4f36f82898e368 -- .  # upstream code
 ```
 
-The compose project name (`-p olcwave-iso`) and the `olcwave-` container-name
-prefix isolate it from the vm1/vm2/vm3 olcrtc systemd services, which run as
-bare processes outside Docker.
+Never `docker rmi` broadly on a shared daemon, and never run
+`docker compose down` against a project name you did not create: `-p` is a
+label, not a boundary.
 
 ## Changed files vs upstream `80958c4`
 
@@ -124,7 +138,7 @@ created and **deleted afterwards**. Secrets never printed or committed.
 
 | Scenario | Observed result |
 |---|---|
-| Import `/sub/<uuid>` line into Ghostlane 1.0.466 (engine `bac0989`) in an isolated container | `added Jitsi DC` → `State: up` → `curl -x socks5h://127.0.0.1:1080 https://ifconfig.me` answered `185.233.107.198` (workstation egress; no upstream proxy configured) |
+| Import `/sub/<uuid>` line into Ghostlane 1.0.466 (engine `bac0989`) running headless in a dedicated client container | `added Jitsi DC` → `State: up` → `curl -x socks5h://127.0.0.1:1080 https://ifconfig.me` answered `185.233.107.198` (workstation egress; no upstream proxy configured). **CLI only — the Ghostlane GUI was NOT exercised.** |
 | Disable user in Remnawave, client holds cached key, **no refresh** | container removed by reconciler after **10 s**; client reconnect with cached key: `State: failed` (empty room); `GET /sub` → 404 |
 | Re-enable | next `GET /sub` → 200, fresh container, fresh key; re-import → `State: up`, HTTPS through tunnel |
 | Expire (expiry set to now+70 s) | sweep at expiry: `reason=expired` removal |
@@ -140,18 +154,34 @@ Bounded latencies observed: deny → container removal ≤ 1 sweep
 revocation = `REMNAWAVE_UNAVAILABLE_GRACE_SECONDS` (120 s) + ≤ 1 sweep
 (measured ~121 s).
 
-### Isolation note for this workstation
+### Isolation note for this workstation — CONTRACT VIOLATION, recorded
 
-The host Docker daemon is shared with unrelated services (alertlab, …), and
-rootless dockerd on this kernel cannot run runc containers (devpts gid-5 /
-proc mounts blocked without rootlesskit+slirp4netns). The proof run therefore
-used the host daemon with strict containment: the API runs as a plain user
-process (no socket mounted anywhere), only `olcwave-<tag>-<shortUuid>`
-containers are touched (verified: the parallel `olcwave-iso-pg` postgres was
-left alone by the reconciler after the ownership-pattern fix), and the test
-Ghostlane client ran in its own container `gl-e2e-box` (removed afterwards).
-For production use the dedicated-daemon/VM runbook above remains the
-recommended shape.
+The proof run **used the workstation's shared host Docker daemon
+(`/var/run/docker.sock`) from a plain-user process**, which the safety
+contract forbids: holding a daemon socket is full daemon control regardless
+of which user the API runs as, and `-p` project names / `olcwave-` name
+prefixes are labels, not isolation. This was a violation, not a mitigation.
+
+Real incident caused by this setup: the reconciler initially mis-classified
+any `olcwave-*`-prefixed container as panel-owned and **force-removed an
+unrelated test container named `olcwave-iso-postgres` (and
+`olcwave-iso-pgtwo`)** on the shared daemon (SIGKILL + destroy, events
+21:24–22:07). A later parallel `olcwave-iso-pg` survived only after the
+ownership-pattern fix. A foreign-name container on a production daemon could
+have been any service.
+
+Cleanup truth: all containers created for the proof were removed (test
+olcrtc containers, `olcwave-iso-pg`/`olcwave-iso-postgres`, `gl-e2e-box`,
+probe/hello containers), the temporary API process and rootless dockerd were
+stopped, `/tmp` evidence dirs cleaned, and the `olcrtc` image + two
+`postgres:16-alpine` image references remain on the host daemon. No
+vm1/vm2/vm3 service, production DB, or alertlab container was touched.
+
+Remaining on this workstation: rootless-dind scaffolding under
+`Developer/olcwave/.rundata/` (dockerd stopped; logs kept), the built
+`olcrtc` image, and `/tmp` evidence files listed below. No further
+shared-daemon operations were or will be performed; production use must
+follow the dedicated-daemon/VM runbook above.
 
 ## Verification status
 
@@ -161,3 +191,31 @@ policy checks, engine build reproducibility (byte-identical), the pinned
 Docker image, and the full end-to-end revocation/recovery matrix in
 "Observed proofs" — real tunnel traffic, real revocation, real recovery,
 no mock echoes.
+
+## Evidence paths (raw artifacts of each proof row)
+
+- Tunnel-up / HTTPS egress: `/tmp/sub1.txt`, `/tmp/sub4.txt` (subscription
+  bodies with `olcrtc://` lines), `/tmp/olcwave-api.log` (API requests),
+  `/tmp/gl-e2e-daemon.log` (Ghostlane client daemon log). Ghostlane itself
+  ran inside container `gl-e2e-box`; its per-command outputs are quoted in
+  the transcript, daemon log survives at the path above.
+- Disable → 10 s removal + cached-key fail: `/tmp/olcwave-api.log` lines
+  `revocation: removed 1 container(s) ... (reason=status_disabled)` and
+  `GET /sub/... 404`; client `State: failed` quoted in transcript.
+- Expire: same log, `reason=expired`; squad: `reason=not_in_squad`; delete:
+  `reason=not_found`.
+- Outage grace + past-grace revoke: `/tmp/olcwave-api.log`
+  `grace 120s started` → `longer than 120s grace - revoking`.
+- Race test: `/tmp/out1.txt`–`/tmp/out5.txt` (5 concurrent 200 responses),
+  subsequent `revocation: ... (reason=status_disabled)`.
+- Remnawave-side user lifecycle (create/enable/disable/delete responses,
+  never containing secrets): `/tmp/e2e.json`, `/tmp/dis.json`, `/tmp/en.json`,
+  `/tmp/exp.json`, `/tmp/sq.json`, `/tmp/outage.json`, `/tmp/race.json`,
+  `/tmp/usr*.json`, `/tmp/u2.json`.
+- Panel commit IDs, oldest → newest:
+  `475c9dfc08caa55da6905ac0ac38c5669cc7669f`,
+  `375b784a9be74479c634c56b48a7d9a2d1f3cafc`,
+  `bf83fc36e7b473b768d9c19adcce9056d727639e`,
+  `f46ddd40c4fe0ef79afc7c7185762ac0ba64c34e`,
+  `337b140203057c0ede02038747a2404c21720de2`,
+  `50f9eea2f2aceae68f37a63bd4b02116f2622965`.
