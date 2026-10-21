@@ -59,7 +59,7 @@ Same env as upstream (see `backend/.env.example`) plus:
 REMNAWAVE_UNAVAILABLE_GRACE_SECONDS=120   # bounded stale-access window
 REVOCATION_CHECK_INTERVAL=30              # reconcile sweep period (s)
 RW_CA_BUNDLE=                             # optional PEM CA bundle path
-RW_SQUAD_NAME=vpn-users                   # required squad (empty = all users)
+RW_SQUAD_NAME=vpn-users                   # required squad by name or UUID (empty = all users)
 ```
 
 ## Isolated deployment (operator runbook)
