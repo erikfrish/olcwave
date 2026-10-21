@@ -37,6 +37,8 @@ class OlcRTC:
         docker = docker_client.docker
         name = f"olcwave-{config_tag}-{user_id}"
 
+        from olcrtc.service import Containers
+
         try:
             old = await docker.containers.get(name)
             await old.delete(force=True)
@@ -46,6 +48,7 @@ class OlcRTC:
         container = await docker.containers.create(
             config={
                 "Image": "olcrtc",
+                "Labels": Containers.panel_labels(config_tag, user_id),
                 "Env": [
                     f"CONFIG={config}",
                     f"UPSTREAM_SOCKS={upstream_proxy_addr}",
@@ -119,6 +122,8 @@ class OlcRTC:
         new_container = await docker.containers.create(
             config={
                 "Image": image,
+                # Preserve the panel management labels across restarts.
+                "Labels": info["Config"].get("Labels") or {},
                 "Env": [f"{k}={v}" for k, v in env.items()],
                 "HostConfig": {
                     "ExtraHosts": [

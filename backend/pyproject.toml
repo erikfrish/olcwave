@@ -18,3 +18,16 @@ dependencies = [
     "fake-useragent>=2.2.0",
     "aiodocker>=0.27.0",
 ]
+
+[tool.pytest.ini_options]
+# Tests import app modules (config, rw, subscriptions, ...) directly, so the
+# backend/src dir must be on sys.path.
+pythonpath = ["src"]
+testpaths = ["tests"]
+asyncio_mode = "auto"
+
+[dependency-groups]
+dev = [
+    "pytest>=8.3.0",
+    "pytest-asyncio>=0.24.0",
+]

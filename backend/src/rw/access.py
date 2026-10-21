@@ -37,11 +37,13 @@ class RwAccess:
     expires_at: datetime | None = None
     status: str | None = None
     sub_revoked_at: datetime | None = None
+    # The authoritative user record the decision came from, when the panel
+    # answered. Lets callers build local state without a second API call.
+    user: object | None = None
 
     @property
     def found(self) -> bool:
         return self.reason != "not_found"
-
 
 REASON_MISSING = "not_found"
 REASON_DISABLED = "status_disabled"
@@ -73,11 +75,11 @@ def evaluate_user(user) -> RwAccess:
 
     status = str(getattr(user, "status", "") or "")
     if status.upper() != "ACTIVE":
-        return RwAccess(short_uuid, False, REASON_DISABLED, user.username, _aware(user.expire_at), status, user.sub_revoked_at)
+        return RwAccess(short_uuid, False, REASON_DISABLED, user.username, _aware(user.expire_at), status, user.sub_revoked_at, user)
 
     expire_at = _aware(user.expire_at)
     if expire_at is None or expire_at <= now:
-        return RwAccess(short_uuid, False, REASON_EXPIRED, user.username, expire_at, status, user.sub_revoked_at)
+        return RwAccess(short_uuid, False, REASON_EXPIRED, user.username, expire_at, status, user.sub_revoked_at, user)
 
     # sub_revoked_at is recorded but never denied on by itself: Remnawave's
     # revoke action is a credential rotation (old shortUuid stops resolving
@@ -88,9 +90,9 @@ def evaluate_user(user) -> RwAccess:
     revoked_at = _aware(user.sub_revoked_at)
 
     if not is_user_in_squad(user):
-        return RwAccess(short_uuid, False, REASON_SQUAD, user.username, expire_at, status, revoked_at)
+        return RwAccess(short_uuid, False, REASON_SQUAD, user.username, expire_at, status, revoked_at, user)
 
-    return RwAccess(short_uuid, True, REASON_OK, user.username, expire_at, status, revoked_at)
+    return RwAccess(short_uuid, True, REASON_OK, user.username, expire_at, status, revoked_at, user)
 
 
 def is_user_in_squad(user) -> bool:

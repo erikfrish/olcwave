@@ -1,4 +1,4 @@
-from fastapi import APIRouter, HTTPException, Response
+from fastapi import APIRouter, HTTPException, Response, Request
 from config import settings
 from settings.service import SettingsService
 from subscriptions.service import Subscriptions
@@ -12,10 +12,17 @@ async def get_provider_name(short_uuid: str):
     if settings.RW_ENABLED:
         from rw.reconcile import SubscriptionGuard, ReconcileManager
 
-        allowed, _reason = await SubscriptionGuard.check(short_uuid)
-        if not allowed:
+        decision = await SubscriptionGuard.check(short_uuid)
+        if not decision.allowed:
             try:
-                await ReconcileManager.revoke_user(short_uuid, "subscription_check_denied")
+                if decision.access is not None:
+                    # Definite deny fact: revoke owned containers. During an
+                    # outage there is nothing authoritative to act on and
+                    # nothing is mutated.
+                    await ReconcileManager.revoke_user(
+                        short_uuid,
+                        f"subscription_check_denied: {decision.reason}",
+                    )
             except Exception:
                 pass
             raise HTTPException(status_code=404, detail="Not found")
@@ -34,7 +41,15 @@ async def get_provider_name(short_uuid: str):
 
 
 @router.get("/{short_uuid}")
-async def get(short_uuid: str):
+async def get(short_uuid: str, request: Request):
     sub = await Subscriptions.get(short_uuid)
-
+    # Ghostlane parses each text line as a connection. OLCBox metadata
+    # comments would appear as bogus unsupported profiles in that client.
+    if sub.status_code == 200 and "ghostlane" in request.headers.get("user-agent", "").lower():
+        lines = [line for line in sub.body.decode().splitlines()
+                 if line.startswith(("olcrtc://", "vless://", "hysteria2://"))]
+        return Response(content="\n".join(lines) + "\n", media_type="text/plain",
+                        headers={"Cache-Control": "private, no-store", "Vary": "User-Agent"})
+    sub.headers["Cache-Control"] = "private, no-store"
+    sub.headers["Vary"] = "User-Agent"
     return sub

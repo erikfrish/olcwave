@@ -14,12 +14,12 @@ contributors — see `olcrtc-pinned/LICENSE` and `olcrtc-pinned/NOTICE`.
 
 | # | Upstream behavior | This fork |
 |---|---|---|
-| 1 | `rw/sdk.py:isUserValid` trusted `sub/{uuid}/info`: `is_found` + squad only. A **DISABLED** user, an **expired** user, or a user whose subscription was **revoked** in Remnawave still got a subscription (proven against Remnawave 3.4.5: disabled user with `expireAt=2020` returned `accepted=True, status=DISABLED`). | `backend/src/rw/access.py` — one policy: access requires `status == ACTIVE`, `expire_at` in the future, `sub_revoked_at is None`, squad membership when configured. Enforced at every subscription request **and** continuously in the background. |
+| 1 | `rw/sdk.py:isUserValid` trusted existence and squad only; a disabled/expired user was accepted. | Access requires ACTIVE, future expiry and configured squad membership. `sub_revoked_at` is a rotation marker, not a permanent ban; previous keys are revoked while the valid current link can recover. |
 | 2 | `Subscriptions.get` deleted the user's containers only when *that* request found an invalid user. A client holding cached URIs kept working forever — containers stayed up and the key stayed live. | `backend/src/rw/reconcile.py` — `ReconcileManager` sweeps every `REVOCATION_CHECK_INTERVAL` (default 30 s) and removes **only that user's** `olcwave-<tag>-<short_uuid>` containers on any deny fact. Startup reconciliation runs one sweep before the API serves. |
 | 3 | On Remnawave outage upstream threw → 500 → no change; cached credentials stayed valid indefinitely. | Bounded grace: `REMNAWAVE_UNAVAILABLE_GRACE_SECONDS` (default 120 s) since the last successful evaluation. Past the grace the reconciler revokes; a subscription request past the grace is denied (fail-closed). There is **no indefinite stale access**. |
 | 4 | Sync deleted the local DB row for users outside the squad but left their containers. | `Users.delete` now removes that user's owned containers (`Containers.remove_all_by_short_uuid`), and sync only scopes *existence* (squad); status/expiry/revocation are enforced at access time from Remnawave, so disabled/expired members remain visible to the operator but denied. |
-| 5 | Two concurrent `GET /sub/{uuid}` requests could both see a profile "missing" and double-create/replace the same container (`OlcRTC.run` force-deletes then creates). | Per-user `asyncio.Lock` around `ensure_profiles_running` (`subscriptions/service.py:ensure_profiles_running_locked`). |
-| 6 | Transport image floated: `git clone --depth=1 openlibrecommunity/olcrtc` at build time — whatever HEAD was that day. | Vendored pinned source `backend/olcrtc/olcrtc-pinned/` @ `bac09891b3b4d3d4d9a48a1cb8eb61e674752dd1` = engine `v0.0.0-20261012005350-bac09891b3b4` reported by Ghostlane 1.0.466. Rebuilt with `go build -trimpath ./cmd/olcrtc` this is **byte-identical** to the engine binary released with Ghostlane 1.0.466 (SHA-256 `d19cf4e55122c9c7b19b45267508b71272f38a0840222c4054b9d2eefcc39988`). |
+| 5 | Concurrent requests could create or replace the same container; revocation raced provisioning. | One non-reentrant per-user lock covers authoritative evaluation, provisioning and revocation. Outage requests can only read existing cached configuration within persisted grace. |
+| 6 | Transport image floated with the upstream Git branch. | Vendored `ghostlane-project/olcrtc@bac09891b3b4d3d4d9a48a1cb8eb61e674752dd1`, matching the engine source used by Ghostlane 1.0.466. The VM image binary SHA-256 is `691596f155632571c96be893a9218547b725b19af7355041398e0aed7620df3e`; build flags differ from the released binary. Protocol compatibility was proven by real HTTPS through Ghostlane, not byte identity. |
 | 7 | Subscription advertised traffic as if authoritative. | Header comment in code + docs: the `#used/#available` values are **local** SOCKS-proxy accounting from this panel's own containers — not Remnawave node traffic. No combined accounting is claimed. |
 | 8 | CA handling fixed to system store only. | `RW_CA_BUNDLE` (optional PEM path) is passed to the Remnawave SDK's httpx client; empty = system trust store (`/etc/ssl/certs/ca-certificates.crt` or `Talos_Home_CA_Root_CA.pem`). |
 
@@ -38,15 +38,13 @@ contributors — see `olcrtc-pinned/LICENSE` and `olcrtc-pinned/NOTICE`.
   the reconciler never touches a user whose evaluation says `allowed`.
 - **Credential stability:** for valid users nothing rotates — container
   configs and their `crypto.key` persist; the reconciler only removes.
-- **Blast radius:** every removal path classifies a container as
-  panel-owned only when its name is exactly `olcwave-<tag>-<owner>` and
-  `<owner>` matches the Remnawave shortUuid alphabet
-  (`olcrtc/service.py:Containers.SHORT_UUID_RE`). Foreign containers that
-  merely share the `olcwave-` prefix (ops tooling, an isolated postgres,
-  …) are never started, stopped or removed.
-- **Reentrancy:** `revoke_local` → `revoke_user` nest on the same per-user
-  lock; a plain `asyncio.Lock` deadlocked the event loop, so the lock is
-  reentrancy-safe per task (`subscriptions/service.py:acquire_user_lock`).
+- **Blast radius:** panel ownership requires the `olcwave.managed=true`,
+  `olcwave.config_tag`, and `olcwave.owner` container labels. An unmarked
+  container is never owned merely because its name starts with `olcwave-`.
+  The VM is the daemon security boundary; labels alone are not isolation.
+- **Locking:** one plain per-user lock surrounds evaluation and mutation;
+  private unlocked removal helpers run only inside that critical section.
+  There is no nested/reentrant lock acquisition.
 - **API deadlines:** every Remnawave HTTP call is bounded (10 s request /
   5 s connect). A stalled panel surfaces as `RemnawaveUnavailable` (grace),
   never as a hung request.
@@ -183,14 +181,15 @@ Remaining on this workstation: rootless-dind scaffolding under
 shared-daemon operations were or will be performed; production use must
 follow the dedicated-daemon/VM runbook above.
 
-## Verification status
+## Current verification status
 
-Exercised against the real Remnawave 3.4.5 panel and the released Ghostlane
-1.0.466 client (isolated test users created and **removed afterwards**):
-policy checks, engine build reproducibility (byte-identical), the pinned
-Docker image, and the full end-to-end revocation/recovery matrix in
-"Observed proofs" — real tunnel traffic, real revocation, real recovery,
-no mock echoes.
+The shared-workstation trial above is historical evidence and violated the
+isolation contract. The authoritative acceptance is the dedicated VM100 run:
+see [VM acceptance report](../deploy/ACCEPTANCE.vm.md). Remnawave/OLCWave GUI,
+Ghostlane 1.0.466 CLI, real HTTPS, GUI disable/enable/expiry/squad removal,
+full and password-only revoke, restart stability and bounded panel outage
+were exercised there. The Ghostlane desktop/mobile GUI was not exercised.
+
 
 ## Evidence paths (raw artifacts of each proof row)
 

@@ -34,17 +34,11 @@ class Profiles:
             _= await ProfilesDB.add(db, profile) 
 
     @staticmethod
-    async def get(tag: str):
-        async with async_session_factory() as db:
-            profile = await ProfilesDB.get(db, tag) 
-        return profile
-
-    @staticmethod
     async def update(tag: str, name: str, profile: str):
         profile = Profiles.validate(profile)
 
-        async with async_session_factory() as db:  
-            _= await ProfilesDB.update(db, tag, name, profile) 
+        async with async_session_factory() as db:
+            _= await ProfilesDB.update(db, tag, name, profile)
 
         await Containers.stop_all_by_config_tag(tag)
 

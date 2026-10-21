@@ -12,17 +12,10 @@ class TrafficManager:
     _last_totals: dict[str, int] = {}
 
     @staticmethod
-    def _owner_of(name: str) -> str | None:
-        parts = name.split("-", 2)
-
-        if (
-            len(parts) == 3
-            and parts[0] == "olcwave"
-            and Containers.SHORT_UUID_RE.fullmatch(parts[2])
-        ):
-            return parts[2]
-
-        return None
+    def _owner_of(info: dict) -> str | None:
+        """Owner from management labels; None for unmarked containers."""
+        parsed = Containers.parse_panel_labels(info)
+        return parsed[1] if parsed is not None else None
 
     @staticmethod
     async def _collect_deltas() -> dict[str, int]:
@@ -38,7 +31,7 @@ class TrafficManager:
             if not await Containers.is_panel_container(cont):
                 continue
 
-            owner = TrafficManager._owner_of(name)
+            owner = TrafficManager._owner_of(info)
 
             if owner is None:
                 continue
@@ -84,7 +77,7 @@ class TrafficManager:
             if not await Containers.is_panel_container(cont):
                 continue
 
-            if TrafficManager._owner_of(name) != short_uuid:
+            if TrafficManager._owner_of(info) != short_uuid:
                 continue
 
             try:

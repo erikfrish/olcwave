@@ -2,7 +2,9 @@
 # This file is part of olcwave.
 # OLCWave is free software licensed under AGPL-3.0.
 #
-# Continuous background reconciliation of Remnawave access.
+# One policy object for Remnawave access decisions (rw.policy) plus a single
+# per-user state machine shared by the request path (SubscriptionGuard) and
+# the background reconciler (ReconcileManager).
 #
 # Every REVOCATION_CHECK_INTERVAL seconds each user with running olcwave
 # containers is re-evaluated against the Remnawave user record. On a definite
@@ -11,93 +13,119 @@
 # crypto key never keeps running. A subscription revoke in Remnawave rotates
 # credentials: the old shortUuid stops resolving there (not_found -> removed
 # here), and a revoke-with-kept-shortUuid is caught by the sub_revoked_at
-# generation watcher below - the rotation event removes this user's
-# containers once, so cached old olcrtc keys die while the still-valid user
-# re-provisions fresh keys on the next subscription fetch. On Remnawave
-# outage a bounded grace window applies (REMNAWAVE_UNAVAILABLE_GRACE_SECONDS
-# since the last successful evaluation); past the window containers are
-# removed too, so no indefinite stale access exists. Valid users are never
-# touched between rotations: reconcile only removes, never restarts.
+# generation watcher - the rotation event removes this user's containers
+# once, so cached old olcrtc keys die while the still-valid user re-provisions
+# fresh keys on the next subscription fetch. On Remnawave outage a bounded
+# grace window applies (REMNAWAVE_UNAVAILABLE_GRACE_SECONDS, persisted in
+# users.access_state via rw.policy so a restart cannot extend it); past the
+# window containers are removed too, so no indefinite stale access exists.
+# Valid users are never touched between rotations: reconcile only removes,
+# never restarts. Container ownership is the strict `olcwave-<tag>-<owner>`
+# name scheme plus management labels; no assumption is made about the owner.
 
 import asyncio
 import logging
-import time
-from datetime import datetime, timezone
 
 from config import settings
-from rw.sdk import RemnawaveUnavailable, evaluateAccess
-from rw.access import REASON_MISSING
+from rw.policy import (
+    Decision,
+    UserAccessLedger,
+    evaluate,
+    grace_seconds,
+)
+from rw import policy
+from rw.sdk import RemnawaveUnavailable
 from olcrtc.sdk import OlcRTC
 from olcrtc.service import Containers
-from users.service import Users
 
 logger = logging.getLogger(__name__)
 
 
+
+
+async def panel_owned_containers(short_uuid: str | None = None) -> list:
+    """Panel-managed containers, decided by management LABELS.
+
+    A container counts as panel-owned only when it carries
+    `olcwave.managed=true` plus a non-empty `olcwave.config_tag` and a
+    non-empty `olcwave.owner` (written by OlcRTC.run and preserved on
+    restart). With short_uuid given, only that owner's containers. The owner
+    is matched verbatim against the labels - no alphabet, dash or length
+    assumption (Remnawave shortUuids may contain '-'/'_' and vary in
+    length). Unmarked containers are NEVER classified by name, so foreign
+    containers that merely share the `olcwave-` prefix (ops tooling, an
+    isolated postgres) can never be touched.
+    """
+    owned = []
+    for cont in await OlcRTC.all(True):
+        info = await cont.show()
+        parsed = Containers.parse_panel_labels(info)
+        if parsed is None:
+            continue
+        owner = parsed[1]
+        if short_uuid is not None and owner != short_uuid:
+            continue
+        owned.append(cont)
+    return owned
+
+
+async def revoke_user_unchecked(short_uuid: str, reason: str) -> int:
+    """UNLOCKED removal of every olcwave container owned by short_uuid.
+
+    MUST be called while holding the per-user lock for short_uuid
+    (subscriptions.service.acquire_user_lock). Returns the removed count.
+    """
+    removed = 0
+    for cont in await panel_owned_containers(short_uuid):
+        name = (await cont.show())["Name"].lstrip("/")
+        try:
+            await OlcRTC.remove(name)
+            removed += 1
+        except Exception:
+            logger.exception("revoke: failed to remove container %s", name)
+    if removed:
+        logger.warning(
+            "revocation: removed %d container(s) of %s (reason=%s)",
+            removed, short_uuid, reason,
+        )
+    return removed
+
+
 class ReconcileManager:
-    """Background loop enforcing Remnawave decisions on live containers."""
+    """Background loop enforcing Remnawave decisions on live containers.
+
+    Each per-user pass takes the SAME per-user lock as the subscription
+    request path and performs, inside that one critical section: the
+    authoritative evaluate, the persisted ledger update (last_verified /
+    rotation generation), and any removal. No mutation ever happens outside
+    the lock, and no removal failure is ever recorded as handled.
+    """
 
     _task: asyncio.Task | None = None
 
-    # short_uuid -> monotonic deadline of the outage grace window
-    _grace_deadline: dict[str, float] = {}
-
-    # short_uuid -> last seen sub_revoked_at epoch (credential generation)
-    _seen_revoke_gen: dict[str, float] = {}
-
-
-    @staticmethod
-    async def owned_container_names(short_uuid: str) -> list[str]:
-        """Names of olcwave containers owned by short_uuid (any state)."""
-        names: list[str] = []
-        for cont in await OlcRTC.all(True):
-            info = await cont.show()
-            name = info["Name"].lstrip("/")
-            if not await Containers.is_panel_container(cont):
-                continue
-            if name.endswith(f"-{short_uuid}"):
-                names.append(name)
-        return names
-
     @staticmethod
     async def revoke_user(short_uuid: str, reason: str) -> int:
-        """Remove every olcwave container owned by short_uuid. Returns count.
+        """Remove every panel container owned by short_uuid. Returns count.
 
-        Serializes with the subscription path's per-user lock so a revocation
-        can't interleave with container creation for the same user.
+        Locking variant for callers outside a per-user critical section
+        (router /check, users delete). Raises the last removal error when a
+        container could not be removed - never swallowed.
         """
         from subscriptions.service import acquire_user_lock, release_user_lock
 
-        removed = 0
         await acquire_user_lock(short_uuid)
         try:
-            for name in await ReconcileManager.owned_container_names(short_uuid):
-                try:
-                    await OlcRTC.remove(name)
-                    removed += 1
-                except Exception:
-                    logger.exception("revoke: failed to remove container %s", name)
+            return await revoke_user_unchecked(short_uuid, reason)
         finally:
             release_user_lock(short_uuid)
-        if removed:
-            logger.warning(
-                "revocation: removed %d container(s) of %s (reason=%s)",
-                removed, short_uuid, reason,
-            )
-        return removed
 
     @staticmethod
     async def reconcile_once() -> dict:
-        """One sweep over all users owning olcwave containers."""
+        """One sweep over all users owning panel containers."""
         owners: set[str] = set()
-        for cont in await OlcRTC.all(True):
+        for cont in await panel_owned_containers():
             info = await cont.show()
-            name = info["Name"].lstrip("/")
-            if not await Containers.is_panel_container(cont):
-                continue
-            parts = name.split("-", 2)
-            if len(parts) == 3 and parts[2]:
-                owners.add(parts[2])
+            owners.add(Containers.parse_panel_labels(info)[1])
 
         result = {
             "checked": 0,
@@ -109,69 +137,123 @@ class ReconcileManager:
         for short_uuid in sorted(owners):
             result["checked"] += 1
             outcome = await ReconcileManager._evaluate(short_uuid)
-
-            if outcome == "allowed":
-                result["allowed"] += 1
-                ReconcileManager._grace_deadline.pop(short_uuid, None)
-            elif outcome == "revoked":
-                result["revoked"] += 1
-                ReconcileManager._grace_deadline.pop(short_uuid, None)
-            else:
-                result["unavailable"] += 1
+            result[outcome] += 1  # pyright: ignore[reportArgumentType]
 
         return result
 
     @staticmethod
     async def _evaluate(short_uuid: str) -> str:
-        """Evaluate one owner. Returns 'allowed' | 'revoked' | 'unavailable'."""
-        try:
-            access = await evaluateAccess(short_uuid)
-        except RemnawaveUnavailable as e:
-            grace = getattr(settings, "REMNAWAVE_UNAVAILABLE_GRACE_SECONDS", 0)
-            now = time.monotonic()
-            deadline = ReconcileManager._grace_deadline.get(short_uuid)
-            if deadline is None:
-                ReconcileManager._grace_deadline[short_uuid] = now + grace
-                logger.warning(
-                    "remnawave unavailable for %s (%s); grace %ss started",
-                    short_uuid, e.detail, grace,
-                )
-                return "unavailable"
-            if now < deadline:
-                return "unavailable"
-            logger.error(
-                "remnawave unavailable for %s longer than %ss grace - revoking",
-                short_uuid, grace,
-            )
-            await ReconcileManager.revoke_user(short_uuid, "remnawave_unreachable_past_grace")
-            ReconcileManager._grace_deadline.pop(short_uuid, None)
-            return "revoked"
+        """Evaluate one owner. Returns 'allowed' | 'revoked' | 'unavailable'.
 
+        Runs entirely inside the per-user lock: evaluate -> ledger -> removal.
+        """
+        from subscriptions.service import acquire_user_lock, release_user_lock
+
+        await acquire_user_lock(short_uuid)
+        try:
+            try:
+                decision = await evaluate(short_uuid)
+            except RemnawaveUnavailable as e:
+                return await ReconcileManager._evaluate_unavailable(
+                    short_uuid, str(e)
+                )
+
+            await UserAccessLedger.mark_verified(short_uuid)
+
+            return await ReconcileManager._apply_decision(short_uuid, decision)
+        finally:
+            release_user_lock(short_uuid)
+
+    @staticmethod
+    async def _apply_decision(short_uuid: str, decision) -> str:
+        """Apply an authoritative decision (lock held)."""
         # Credential-rotation watcher: Remnawave's revoke action stamps
         # sub_revoked_at. Whether it rotated the shortUuid (old link 404s ->
-        # denied as not_found above via a later sweep) or kept it, the
-        # rotation itself invalidates every olcrtc key this panel issued
-        # before it. Remove this user's containers once per generation so
-        # cached old credentials die; the valid user re-provisions fresh
-        # keys/containers on their next subscription fetch (recovery works).
-        if access.sub_revoked_at is not None:
-            gen = access.sub_revoked_at.timestamp()
-            if ReconcileManager._seen_revoke_gen.get(short_uuid, 0) < gen:
-                ReconcileManager._seen_revoke_gen[short_uuid] = gen
-                await ReconcileManager.revoke_user(short_uuid, "subscription_revoked_rotation")
-                ReconcileManager._grace_deadline.pop(short_uuid, None)
+        # denied as not_found here) or kept it, the rotation itself
+        # invalidates every olcrtc key this panel issued BEFORE it. Remove
+        # every container created before the rotation epoch; the generation
+        # is persisted as applied ONLY after all old-generation containers
+        # are confirmed gone, so a failed removal is retried by every later
+        # sweep instead of being marked handled. The still-valid user
+        # re-provisions fresh keys/containers on their next subscription
+        # fetch (recovery works; current-link recovery is unaffected).
+        if decision.access is not None and decision.access.sub_revoked_at is not None:
+            gen = decision.access.sub_revoked_at.timestamp()
+            applied = await UserAccessLedger.get_applied_revoke_gen(short_uuid)
+            if applied is None or applied < gen:
+                await ReconcileManager._remove_old_generation(
+                    short_uuid, gen, "subscription_revoked_rotation"
+                )
                 return "revoked"
 
-        if access.allowed:
+        if decision.allowed:
             return "allowed"
 
-        await ReconcileManager.revoke_user(short_uuid, access.reason)
+        await revoke_user_unchecked(short_uuid, decision.reason)
+        return "revoked"
+
+    @staticmethod
+    async def _remove_old_generation(
+        short_uuid: str, gen: float, reason: str
+    ) -> None:
+        """Remove every panel container created before `gen` (lock held).
+
+        Persistence order: removals first, applied-generation stamp last and
+        only on full success. Any failure raises - the caller's sweep logs it
+        and the next sweep retries the same generation. A container created
+        AFTER the rotation (fresh keys) is never touched.
+        """
+        errors: list[str] = []
+        for cont in await panel_owned_containers(short_uuid):
+            info = await cont.show()
+            parsed = Containers.parse_panel_labels(info)
+            if parsed is None:
+                continue
+            name = info["Name"].lstrip("/")
+            created_epoch = Containers.created_epoch(info)
+            if created_epoch >= gen:
+                continue  # fresh post-rotation issuance: keep
+            try:
+                await OlcRTC.remove(name)
+            except Exception as e:
+                errors.append(f"{name}: {e}")
+                logger.exception(
+                    "rotation: failed to remove old-generation container %s",
+                    name,
+                )
+        if errors:
+            raise RuntimeError(
+                f"rotation {reason} for {short_uuid}: "
+                f"{len(errors)} container removal(s) failed; "
+                "generation NOT applied - will retry: " + "; ".join(errors)
+            )
+        await UserAccessLedger.mark_rotation_applied(short_uuid, gen)
+
+    @staticmethod
+    async def _evaluate_unavailable(short_uuid: str, detail: str) -> str:
+        """Outage handling (lock held) with the persisted bounded grace."""
+        lv = await UserAccessLedger.get_last_verified(short_uuid)
+
+        if UserAccessLedger.within_grace(lv):
+            logger.warning(
+                "remnawave unavailable for %s (%s); within %ss persisted "
+                "grace - no mutation, cached state only",
+                short_uuid, detail, grace_seconds(),
+            )
+            return "unavailable"
+
+        # Bounded grace exhausted (or never verified): remove this user's
+        # containers. last_verified stays whatever it is - no ledger write can
+        # restart the window, so later sweeps and restarts stay denied until
+        # Remnawave answers again (no indefinite stale access).
+        await revoke_user_unchecked(
+            short_uuid, "remnawave_unreachable_past_grace"
+        )
         return "revoked"
 
     @staticmethod
     async def _run():
         interval = getattr(settings, "REVOCATION_CHECK_INTERVAL", 30)
-        # first pass right away: startup reconciliation
         while True:
             try:
                 summary = await ReconcileManager.reconcile_once()
@@ -202,36 +284,14 @@ class ReconcileManager:
 
 
 class SubscriptionGuard:
-    """Synchronous-with-request access decision for GET /sub.
+    """Request-path access decision for GET /sub and /sub/{uuid}/check.
 
-    Deny facts (from Remnawave) win immediately. An outage lets a request
-    through only within the same bounded grace window the reconciler uses;
-    past it the subscription is denied. Never invents access.
+    Thin delegate to rw.policy.SubscriptionGuard: the single authoritative
+    evaluate with the persisted bounded grace ledger. Returned Decision
+    carries the RwAccess record when the panel answered; during an outage
+    within grace access is None (cached state only, no mutation).
     """
 
-    _last_ok: dict[str, float] = {}
-
     @staticmethod
-    async def check(short_uuid: str) -> tuple[bool, str]:
-        from rw.sdk import RemnawaveUnavailable
-
-        try:
-            access = await evaluateAccess(short_uuid)
-        except RemnawaveUnavailable as e:
-            grace = getattr(settings, "REMNAWAVE_UNAVAILABLE_GRACE_SECONDS", 0)
-            last = SubscriptionGuard._last_ok.get(short_uuid)
-            now = time.monotonic()
-            if last is not None and now - last <= grace:
-                logger.warning(
-                    "subscription guard: remnawave unreachable for %s (%s), "
-                    "within %ss grace of last success - denying mutation but "
-                    "serving cached state",
-                    short_uuid, e.detail, grace,
-                )
-                return True, "remnawave_unreachable_within_grace"
-            return False, "remnawave_unreachable"
-
-        if access.allowed:
-            SubscriptionGuard._last_ok[short_uuid] = time.monotonic()
-            return True, access.reason
-        return False, access.reason
+    async def check(short_uuid: str) -> Decision:
+        return await policy.SubscriptionGuard.check(short_uuid)

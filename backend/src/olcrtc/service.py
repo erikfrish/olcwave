@@ -1,5 +1,5 @@
 import asyncio
-import re
+from datetime import datetime
 
 from aiodocker.containers import DockerContainer
 
@@ -14,45 +14,79 @@ from olcrtc.schemas import (
 
 
 class Containers:
-    # Remnawave shortUuids on this panel are 16 chars from a crockford-ish
-    # alphabet (digits, A-Z minus I/O, a-z minus i/l/o, '-' and '_').
-    # Anything else after the tag is not a user id, so foreign containers
-    # that merely share the "olcwave-" prefix (ops tooling, isolated
-    # postgres, ...) are never treated as panel-owned and never removed.
-    SHORT_UUID_RE = re.compile(r"^[0-9A-HJ-NP-Za-hj-np-z_-]{4,32}$")
+    # Management labels written on every container this panel creates.
+    # Ownership is decided by these labels, NOT by the container name: a
+    # foreign container that merely shares the `olcwave-` name prefix (ops
+    # tooling, an isolated postgres, ...) never matches and is never touched.
+    MANAGED_LABEL = "olcwave.managed"
+    TAG_LABEL = "olcwave.config_tag"
+    OWNER_LABEL = "olcwave.owner"
+
+    @staticmethod
+    def panel_labels(config_tag: str, short_uuid: str) -> dict[str, str]:
+        return {
+            Containers.MANAGED_LABEL: "true",
+            Containers.TAG_LABEL: config_tag,
+            Containers.OWNER_LABEL: short_uuid,
+        }
+
+    @staticmethod
+    def parse_panel_labels(info: dict) -> tuple[str, str] | None:
+        """(config_tag, owner) from labels, or None for unmarked containers.
+
+        The owner is whatever Remnawave issued (any non-empty string, may
+        contain '-' or '_'; no length or alphabet assumption). The canonical
+        container name is `olcwave-<tag>-<owner>` VERBATIM - never re-derived
+        by splitting the name, which is ambiguous when the owner itself
+        contains dashes.
+        """
+        labels = info.get("Config", {}).get("Labels") or {}
+        if str(labels.get(Containers.MANAGED_LABEL, "")).lower() != "true":
+            return None
+        tag = labels.get(Containers.TAG_LABEL) or ""
+        owner = labels.get(Containers.OWNER_LABEL) or ""
+        if not tag or not owner:
+            return None
+        return tag, owner
+
+    @staticmethod
+    def created_epoch(info: dict) -> float:
+        """Docker inspect Created (ISO-8601) as a wall-clock epoch."""
+        raw = info.get("Created")
+        if raw is None:
+            return 0.0
+        if isinstance(raw, (int, float)):
+            return float(raw)
+        try:
+            return datetime.fromisoformat(
+                str(raw).replace("Z", "+00:00")
+            ).timestamp()
+        except ValueError:
+            return 0.0
 
     @staticmethod
     async def is_panel_container(cont: DockerContainer) -> bool:
         info = await cont.show()
-
-        name = info["Name"].lstrip("/")
-        parts = name.split("-", 2)
-
-        return (
-            len(parts) == 3
-            and parts[0] == "olcwave"
-            and bool(Containers.SHORT_UUID_RE.fullmatch(parts[2]))
-        )
+        return Containers.parse_panel_labels(info) is not None
 
     @staticmethod
     async def to_schema(cont: DockerContainer) -> ContainerSchema | None:
         info = await cont.show()
 
-        name = info["Name"].lstrip("/")
-        parts = name.split("-", 2)
-
-        if len(parts) != 3:
+        parsed = Containers.parse_panel_labels(info)
+        if parsed is None:
             return None
 
-        _, config_tag, user_id = parts
+        config_tag, user_id = parsed
 
         return ContainerSchema(
             id=info["Id"][:12],
-            name=name,
+            name=info["Name"].lstrip("/"),
             short_uuid=user_id,
             config_tag=config_tag,
             status=info["State"]["Status"],
             created=info["Created"],
+            created_epoch=Containers.created_epoch(info),
             image=info["Config"]["Image"],
         )
 

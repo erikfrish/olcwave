@@ -31,11 +31,22 @@ class Users:
 
     @staticmethod
     async def delete(short_uuid: str):
-        async with async_session_factory() as db:
-            _ = await UserDB.delete(db, short_uuid)
-        from olcrtc.service import Containers
+        from subscriptions.service import acquire_user_lock, release_user_lock
 
-        await Containers.remove_all_by_short_uuid(short_uuid)
+        # Whole deletion inside the same per-user critical section as the
+        # subscription request path: the DB row and the containers vanish
+        # atomically with respect to any ensure/creation for the same
+        # short_uuid - a request that passed an (earlier) authorization can
+        # never re-create the user row or resurrect containers afterwards.
+        await acquire_user_lock(short_uuid)
+        try:
+            async with async_session_factory() as db:
+                _ = await UserDB.delete(db, short_uuid)
+
+            from olcrtc.service import Containers
+            await Containers.remove_all_by_short_uuid(short_uuid)
+        finally:
+            release_user_lock(short_uuid)
 
     @staticmethod
     async def get_all() -> list[UserSchema]:

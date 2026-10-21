@@ -4,3 +4,5 @@ backend/.venv/
 __pycache__/
 *.pyc
 deploy/backend.env
+deploy/tls/
+deploy/.session-*.md

@@ -7,6 +7,8 @@ class ContainerSchema(BaseModel):
     config_tag: str
     status: str
     created: str
+    # Creation time as a wall-clock epoch (rotation-generation comparison).
+    created_epoch: float
     image: str
 
 class ContainerLogsSchema(BaseModel):

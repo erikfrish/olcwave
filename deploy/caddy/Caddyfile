@@ -1,0 +1,77 @@
+# OLCWave static Caddy config for the dedicated Debian 13 VM.
+#
+# Contract (parent-owned VM, LAN-only):
+# Two LAN HTTPS listeners using a dedicated test certificate; no public ACME.
+# HOST_IP selects the VM address, certificate SAN must match it.
+#   - :8080 = admin panel SPA + API:  /api/* -> API with the /api prefix
+#     stripped (handle_path); /sub/* -> API verbatim so the subscription URL
+#     the panel copies (<origin>/sub/{uuid}) works raw on the same origin.
+#   - :8081 = subscription page origin. The SPA parses the FIRST path
+#     segment as the subscription id (subscriptionPage/src/App.tsx:
+#     /^\/([^/]+)/), so it must be served at an origin root - exactly the
+#     upstream sub-domain contract from caddy/Caddyfile.template, folded
+#     onto a second LAN port:
+#       /{id}/check  -> API /sub/{id}/check
+#       browser UA   -> subscriptionPage/dist SPA
+#       anything else-> API /sub{uri} (raw subscription for OLCBox/Ghostlane)
+#
+# Panel UI (admin)   https://<HOST_IP>:8080/
+# Panel API          https://<HOST_IP>:8080/api/...
+# Raw subscription   https://<HOST_IP>:8080/sub/{uuid}
+# Sub page (browser) https://<HOST_IP>:8081/{uuid}
+# Raw subscription   https://<HOST_IP>:8081/{uuid} (client UA)
+
+{
+	# LAN-only deployment: never try ACME/HTTPS, never bind 80/443.
+	auto_https off
+	admin off
+    default_sni olcwave-test.home.arpa
+}
+
+# ---- :8080 admin panel + same-origin API/raw-sub --------------------------
+https://{$HOST_IP}:8080 {
+    tls /certs/server.crt /certs/server.key
+
+	# API: strip the /api prefix, forward to FastAPI.
+	handle_path /api/* {
+		reverse_proxy api:8000
+	}
+
+	# Subscriptions: forward /sub/* verbatim (prefix kept).
+	handle /sub/* {
+		reverse_proxy api:8000
+	}
+
+	# Admin panel SPA at /.
+	handle {
+		root * /srv/frontend/dist
+		try_files {path} /index.html
+		file_server
+	}
+}
+
+# ---- :8081 subscription page + raw subscription ---------------------------
+https://{$HOST_IP}:8081 {
+    tls /certs/server.crt /certs/server.key
+
+	@check path_regexp check ^/(?P<id>[^/]+)/check$
+
+	handle @check {
+		rewrite * /sub/{re.id}/check
+		reverse_proxy api:8000
+	}
+
+	# Browser gets the SPA; clients (OLCBox, Ghostlane, curl) get raw text.
+	@browser header_regexp browser User-Agent (?i)^Mozilla/
+
+	handle @browser {
+		root * /srv/subscriptionPage/dist
+		try_files {path} /index.html
+		file_server
+	}
+
+	handle {
+		rewrite * /sub{uri}
+		reverse_proxy api:8000
+	}
+}
