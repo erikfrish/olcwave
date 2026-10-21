@@ -2,10 +2,17 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 
 class Settings(BaseSettings):
     RW_ENABLED: bool 
-    RW_API_URL: str = ""
     RW_API_TOKEN: str = ""
-    RW_CADDY_TOKEN: str = ""
+    RW_API_URL: str = ""
+    # Optional custom CA bundle for the Remnawave API client (PEM file path).
+    # Empty = system trust store.
+    RW_CA_BUNDLE: str = ""
 
+    # Bounded revocation latency: how long a Remnawave outage may keep
+    # previously-verified access alive before containers are removed.
+    REMNAWAVE_UNAVAILABLE_GRACE_SECONDS: int = 120
+    # How often the background reconciler re-checks users with containers.
+    REVOCATION_CHECK_INTERVAL: int = 30
     DB_HOST: str
     DB_PORT: int
     POSTGRES_USER: str

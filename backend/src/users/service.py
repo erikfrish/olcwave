@@ -33,6 +33,9 @@ class Users:
     async def delete(short_uuid: str):
         async with async_session_factory() as db:
             _ = await UserDB.delete(db, short_uuid)
+        from olcrtc.service import Containers
+
+        await Containers.remove_all_by_short_uuid(short_uuid)
 
     @staticmethod
     async def get_all() -> list[UserSchema]:
@@ -82,6 +85,10 @@ class Users:
         rw_users = await getAllUsers()
         db_users = await Users.get_all()
 
+        # Squad scoping only: who may exist here at all. Status, expiry and
+        # revocation are enforced at access time from Remnawave (rw.access),
+        # so disabled/expired users stay visible to the operator instead of
+        # silently disappearing, while still being denied everywhere.
         rw_map = {
             u.short_uuid: u
             for u in rw_users.users

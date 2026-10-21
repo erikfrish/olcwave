@@ -3,6 +3,7 @@
 # OLCWave is free software licensed under AGPL-3.0.
 
 import asyncio
+import logging
 
 from aiodocker import DockerError
 from fastapi import FastAPI, HTTPException
@@ -10,8 +11,10 @@ from fastapi.middleware.cors import CORSMiddleware
 
 import uvicorn
 
-from routing.service import Routing
-from settings.service import SettingsService
+from subscriptions.router import router as subscriptions_router
+from olcrtc.router import router as containers_router
+from routing.router import router as routing_router
+from rw.reconcile import ReconcileManager
 from settings.router import router as settings_router
 from auth.router import router as auth_router
 from profiles.router import router as configs_router
@@ -40,9 +43,15 @@ async def lifespan(app: FastAPI):
         await XrayCore.run(routing)
 
     if settings.RW_ENABLED:
+        # startup reconciliation: evaluate restored containers before serving
+        try:
+            summary = await ReconcileManager.reconcile_once()
+            if summary["checked"]:
+                logging.getLogger(__name__).info("startup reconciliation: %s", summary)
+        except Exception:
+            logging.getLogger(__name__).exception("startup reconciliation failed")
         SyncManager.start()
-
-    traffic_task = asyncio.create_task(TrafficManager.run())
+        ReconcileManager.start()
 
     yield
 
@@ -53,8 +62,8 @@ async def lifespan(app: FastAPI):
         pass
 
     if settings.RW_ENABLED:
+        await ReconcileManager.stop()
         await SyncManager.stop()
-
     try:
         await XrayCore.stop()
     except DockerError:

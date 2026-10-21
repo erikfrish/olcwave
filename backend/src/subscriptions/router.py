@@ -10,8 +10,14 @@ router = APIRouter(prefix="/sub", tags=["subscriptions"])
 @router.get("/{short_uuid}/check")
 async def get_provider_name(short_uuid: str):
     if settings.RW_ENABLED:
-        from rw.sdk import isUserValid
-        if not await isUserValid(short_uuid):
+        from rw.reconcile import SubscriptionGuard, ReconcileManager
+
+        allowed, _reason = await SubscriptionGuard.check(short_uuid)
+        if not allowed:
+            try:
+                await ReconcileManager.revoke_user(short_uuid, "subscription_check_denied")
+            except Exception:
+                pass
             raise HTTPException(status_code=404, detail="Not found")
     else:
         try:

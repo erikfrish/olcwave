@@ -1,4 +1,5 @@
 import asyncio
+import logging
 import secrets
 from typing import Any
 
@@ -15,6 +16,26 @@ from profiles.roomGenerator import RoomChecker, RoomGenerator
 from profiles.service import Containers
 from profiles.service import Profiles
 from users.service import Users
+from rw.reconcile import ReconcileManager, SubscriptionGuard
+from rw.sdk import isUserValid, RemnawaveUnavailable
+
+_profile_locks: dict[str, asyncio.Lock] = {}
+
+
+def _lock_for(short_uuid: str) -> asyncio.Lock:
+    lock = _profile_locks.get(short_uuid)
+    if lock is None:
+        lock = asyncio.Lock()
+        _profile_locks[short_uuid] = lock
+    return lock
+
+
+async def ensure_profiles_running_locked(short_uuid: str):
+    """Serialize ensure_profiles_running per user: concurrent subscription
+    requests (or a request racing the reconciler) must not double-create
+    the same container."""
+    async with _lock_for(short_uuid):
+        return await Subscriptions.ensure_profiles_running(short_uuid)
 
 
 TRANSPORT_NAMES = {
@@ -171,6 +192,9 @@ class Subscriptions:
             f"#update: 2147483647\n"
             f"#refresh: {SettingsService.get().sub_update_interval}\n"
         )
+        # Traffic here is what this panel's own SOCKS proxy counted inside
+        # its olcrtc containers - local accounting only, not Remnawave
+        # node traffic.
         if limit == 0:
             txt += f"#used: {bytes_to_notation(used)}\n"
         else:
@@ -332,12 +356,17 @@ class Subscriptions:
     @staticmethod
     async def get(short_uuid: str):
         if settings.RW_ENABLED:
-            rw_user = await Subscriptions._validate_rw_user(short_uuid)
-            if rw_user is None:
-                await Subscriptions._cleanup_user_containers(short_uuid)
+            allowed, reason = await SubscriptionGuard.check(short_uuid)
+            if not allowed:
+                await Subscriptions.revoke_local(short_uuid)
                 return Response(status_code=404)
 
-            await Subscriptions._ensure_local_user_from_rw(short_uuid, rw_user)
+            try:
+                rw_user = await isUserValid(short_uuid)
+            except RemnawaveUnavailable:
+                rw_user = None  # allowed above via bounded grace or fresh fact
+            if rw_user is not None:
+                await Subscriptions._ensure_local_user_from_rw(short_uuid, rw_user)
         else:
             try:
                 await Users.get(short_uuid)
@@ -350,9 +379,15 @@ class Subscriptions:
                 traffic
             )
 
-        configs, profiles = await Subscriptions.ensure_profiles_running(
-            short_uuid
-        )
+        try:
+            configs, profiles = await ensure_profiles_running_locked(
+                short_uuid
+            )
+        except Exception:
+            logging.getLogger(__name__).exception(
+                "subscription build failed for %s", short_uuid
+            )
+            return Response(status_code=503)
 
         uris = [
             Subscriptions.config_to_uri(
@@ -371,3 +406,13 @@ class Subscriptions:
             ),
             media_type="text/plain",
         )
+
+    @staticmethod
+    async def revoke_local(short_uuid: str):
+        """Stop and remove only this user's olcwave containers (owned set)."""
+        try:
+            await ReconcileManager.revoke_user(short_uuid, "subscription_denied")
+        except Exception:
+            logging.getLogger(__name__).exception(
+                "revocation of %s failed", short_uuid
+            )
