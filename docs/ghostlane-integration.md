@@ -38,10 +38,18 @@ contributors — see `olcrtc-pinned/LICENSE` and `olcrtc-pinned/NOTICE`.
   the reconciler never touches a user whose evaluation says `allowed`.
 - **Credential stability:** for valid users nothing rotates — container
   configs and their `crypto.key` persist; the reconciler only removes.
-- **Blast radius:** every removal path filters names by
-  `olcwave-<tag>-<short_uuid>` (name endswith `-<short_uuid>` **and**
-  `olcwave-` prefix and 3-part name). Nothing else on the Docker daemon is
-  started, stopped or removed.
+- **Blast radius:** every removal path classifies a container as
+  panel-owned only when its name is exactly `olcwave-<tag>-<owner>` and
+  `<owner>` matches the Remnawave shortUuid alphabet
+  (`olcrtc/service.py:Containers.SHORT_UUID_RE`). Foreign containers that
+  merely share the `olcwave-` prefix (ops tooling, an isolated postgres,
+  …) are never started, stopped or removed.
+- **Reentrancy:** `revoke_local` → `revoke_user` nest on the same per-user
+  lock; a plain `asyncio.Lock` deadlocked the event loop, so the lock is
+  reentrancy-safe per task (`subscriptions/service.py:acquire_user_lock`).
+- **API deadlines:** every Remnawave HTTP call is bounded (10 s request /
+  5 s connect). A stalled panel surfaces as `RemnawaveUnavailable` (grace),
+  never as a hung request.
 
 ## Configuration
 
@@ -109,10 +117,47 @@ bare processes outside Docker.
 - `backend/olcrtc/olcrtc-pinned/` — vendored ghostlane-project/olcrtc @ bac0989.
 - `docs/ghostlane-integration.md` — this file.
 
+## Observed proofs (real Remnawave 3.4.5 + Ghostlane 1.0.466, 2026-10-21)
+
+All against the real panel; isolated test users `olcwave-*-proof` were
+created and **deleted afterwards**. Secrets never printed or committed.
+
+| Scenario | Observed result |
+|---|---|
+| Import `/sub/<uuid>` line into Ghostlane 1.0.466 (engine `bac0989`) in an isolated container | `added Jitsi DC` → `State: up` → `curl -x socks5h://127.0.0.1:1080 https://ifconfig.me` answered `185.233.107.198` (workstation egress; no upstream proxy configured) |
+| Disable user in Remnawave, client holds cached key, **no refresh** | container removed by reconciler after **10 s**; client reconnect with cached key: `State: failed` (empty room); `GET /sub` → 404 |
+| Re-enable | next `GET /sub` → 200, fresh container, fresh key; re-import → `State: up`, HTTPS through tunnel |
+| Expire (expiry set to now+70 s) | sweep at expiry: `reason=expired` removal |
+| Remove from squad (`RW_SQUAD_NAME=vpn-users`) | `reason=not_in_squad` removal within one sweep; re-adding squad → allowed again |
+| Delete user in Remnawave | `reason=not_found` removal within one sweep; cached-key reconnect fails |
+| Panel outage (connection refused), no requests | container kept 120 s (no false revoke), then `longer than 120s grace - revoking` |
+| Panel outage, subscription requested, never verified in this process | request fails closed immediately (404); no access invented |
+| Recovery after outage | `GET /sub` → 200; new container; valid-user key stable across sweeps (`restarts=0`) |
+| 5 concurrent `GET /sub` racing a mid-flight disable | no double-create, container removed once deny landed; no resurrection |
+
+Bounded latencies observed: deny → container removal ≤ 1 sweep
+(`REVOCATION_CHECK_INTERVAL`, 30 s default; measured 6–10 s). Outage →
+revocation = `REMNAWAVE_UNAVAILABLE_GRACE_SECONDS` (120 s) + ≤ 1 sweep
+(measured ~121 s).
+
+### Isolation note for this workstation
+
+The host Docker daemon is shared with unrelated services (alertlab, …), and
+rootless dockerd on this kernel cannot run runc containers (devpts gid-5 /
+proc mounts blocked without rootlesskit+slirp4netns). The proof run therefore
+used the host daemon with strict containment: the API runs as a plain user
+process (no socket mounted anywhere), only `olcwave-<tag>-<shortUuid>`
+containers are touched (verified: the parallel `olcwave-iso-pg` postgres was
+left alone by the reconciler after the ownership-pattern fix), and the test
+Ghostlane client ran in its own container `gl-e2e-box` (removed afterwards).
+For production use the dedicated-daemon/VM runbook above remains the
+recommended shape.
+
 ## Verification status
 
-Exercised against the real Remnawave 3.4.5 panel (isolated test user created
-and **removed afterwards**): policy unit checks (valid/expired/disabled/
-revoked/squad-removed/wrong-squad), engine build reproducibility
-(byte-identical), Docker build of the pinned image, and the end-to-end smoke
-described above. See the delivery report for the exact observed outputs.
+Exercised against the real Remnawave 3.4.5 panel and the released Ghostlane
+1.0.466 client (isolated test users created and **removed afterwards**):
+policy checks, engine build reproducibility (byte-identical), the pinned
+Docker image, and the full end-to-end revocation/recovery matrix in
+"Observed proofs" — real tunnel traffic, real revocation, real recovery,
+no mock echoes.
