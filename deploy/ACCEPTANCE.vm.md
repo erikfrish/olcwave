@@ -76,7 +76,10 @@ Private evidence (contains subscription keys — never publish it):
 `vm-report.json`, `api-acceptance.log`, `proxmox-config.txt`, current setup and
 original/updated subscription payloads. Files0600, directory0700.
 
-The VM is retained for review; `onboot=0`. Credentials are private in
-`deploy/backend.env` on the VM and the workstation's protected evidence directory.
-The public test CA is `deploy/tls/ca.crt` inside the VM. Test access teardown is
-recorded in the final operator report; a full VM deletion is not part of acceptance.
+The VM is retained for review; `onboot=0`. The isolated test user and its empty
+Remnawave squad were deleted, the test Ghostlane client was stopped, and no
+olcRTC test container remains. The VM's API, database and GUI remain running.
+Credentials are private in `deploy/backend.env` on the VM and the protected
+workstation evidence directory. The public test CA is `deploy/tls/ca.crt` inside
+the VM. The dedicated read-only API token expires after7 days. No VM deletion
+was performed.
