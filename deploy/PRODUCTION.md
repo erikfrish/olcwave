@@ -45,10 +45,11 @@ Emoji metadata always ends with a newline: without it, following URI lines
 were swallowed by the Ghostlane metadata filter. All three server rows are
 verified in both subscriptions. Provider header stays ASCII. Keys unchanged.
 
-Chosen restrictions: seven days from delivery, aggregate10GiB Ghostlane quota
-across vm1/vm2/vm3, no automatic reset. This quota is NOT combined with VLESS
-traffic in Remnawave. No Ghostlane HWID cap is claimed. Actual private expiry
-and URL are in protected custody, never in Git.
+Current personal limits: no contractual expiry (Remnawave2099 sentinel),
+aggregate500GB decimal per calendar month across vm1/vm2/vm3, reset at00:00
+Europe/Moscow on the first day. The selected monthly reset applies to both
+managed users; existing usage was preserved when lifting the initial trial.
+This quota is NOT combined with VLESS traffic. No Ghostlane HWID cap is claimed.
 
 Enforcement: authoritative Remnawave status/expiry/squad is checked on fetch and
 background sweeps10s; cached keys are removed on all reachable nodes without
