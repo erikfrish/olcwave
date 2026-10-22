@@ -39,7 +39,7 @@ IDs. Node status is visible in OLCWave GUI; unreachable nodes report errors.
 
 A separate Remnawave identity `erikfrish-ghostlane` belongs to `ghostlane-users`.
 The existing `erikfrish` VLESS/AWG identity, URL, keys and unlimited limits were
-preserved. Provider title is `vpn@nazavo.de-erikfrish`.
+preserved. Shared provider title is `vpn@nazavo.de`; account names are separate.
 
 Chosen restrictions: seven days from delivery, aggregate10GiB Ghostlane quota
 across vm1/vm2/vm3, no automatic reset. This quota is NOT combined with VLESS
@@ -91,10 +91,10 @@ Never point node relay to `/var/run/docker.sock` of a VPS root daemon.
 
 Rollback only this integration: disable the limited Ghostlane identity via
 Remnawave, observe its owned engines gone, stop controller/relay units and
-remove the OLCWave ingress through GitOps. Keep old Ghostlane bare services
-and existing VLESS/AWG intact. Do not rotate main erikfrish or run broad Docker
-prune. Keep DB/keys/SSH state backups before changes; production DB access or
-restore requires explicit separate permission.
+remove the OLCWave ingress through GitOps. Legacy bare Ghostlane services
+are permanently retired; preserve existing Remnawave VLESS/AWG instead.
+Do not run broad Docker prune. Keep DB/keys/SSH state backups before changes;
+production DB access or restore requires explicit separate permission.
 
 ## Private custody
 
@@ -114,7 +114,25 @@ a root-only month journal. Timer runs at the boundary, at boot and hourly for
 missed-reset recovery; repeated runs in the same month are no-ops. Private config
 `/etc/olcwave/monthly-quota.json` selects only this user. Initial reset and repeated
 no-op were exercised; next calendar boundary is2026-11-01 00:00 MSK.
-The old Oleg static access remains outside this quota until separately revoked.
+Old Oleg static links and cached olcRTC keys were revoked on2026-10-22;
+only the managed OLCWave access remains, so that old quota bypass is closed.
 Three issued profiles passed actual HTTPS, including retries after node readiness.
 Private URL/policy/proof: `.ignore/olcwave-production/oleg/` in talos-home.
+
+
+## Standalone Ghostlane revocation — 2026-10-22
+
+Both old bearer URLs at sub.nazavo.de return404 for GET, HEAD and browser
+requests. The four old olcRTC credentials failed actual connection probes.
+Legacy bare units on vm1/vm2/vm3 are stopped, disabled and masked; working
+configs, keys and standalone binary were removed. Old publisher/installers
+are removed from talos-home. The old static publisher now serves only help,
+without profile/private-route Secret mounts.
+
+New OLCWave keys for erikfrish and OLEG passed HTTPS on each of the three
+nodes (six successful probes). Their URLs and limits were not changed.
+No Remnawave VLESS/AWG identity was revoked; those active services are separate
+from the retired olcRTC keys. Protected pre-revocation backups are historical
+custody only, not a redeployment source. Proof is in
+`talos-home/.ignore/olcwave-production/legacy-revocation/<UTC>/`.
 
