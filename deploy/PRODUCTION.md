@@ -40,6 +40,9 @@ IDs. Node status is visible in OLCWave GUI; unreachable nodes report errors.
 A separate Remnawave identity `erikfrish-ghostlane` belongs to `ghostlane-users`.
 The existing `erikfrish` VLESS/AWG identity, URL, keys and unlimited limits were
 preserved. Shared provider title is `vpn@nazavo.de`; account names are separate.
+German transport labels are prefixed with the Unicode flag `🇩🇪` during
+subscription rendering. Provider header stays ASCII; raw emoji there caused
+HTTP header encoding failure and was reverted. No server key/config changes.
 
 Chosen restrictions: seven days from delivery, aggregate10GiB Ghostlane quota
 across vm1/vm2/vm3, no automatic reset. This quota is NOT combined with VLESS
