@@ -1,0 +1,9 @@
+[Unit]
+Description=Selected monthly quotas, Moscow calendar boundary
+[Timer]
+OnCalendar=*-*-01 00:00:00 Europe/Moscow
+Persistent=true
+OnBootSec=2min
+OnUnitInactiveSec=1h
+[Install]
+WantedBy=timers.target

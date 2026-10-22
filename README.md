@@ -1,4 +1,12 @@
-# OLCWave
+# OLCWave — Ghostlane / Remnawave fork
+
+Этот форк сохраняет upstream [invdevv/olcwave](https://github.com/invdevv/olcwave) и лицензии авторов. Мы доработали реальный отзыв Ghostlane-доступов через Remnawave, поддержку нескольких изолированных серверов, устойчивый учёт квоты и календарный сброс лимитов.
+
+**Начните с [безопасного запуска](docs/public-deployment.md), а не с upstream install.sh.** Приложению нужен отдельный Docker daemon: доступ к socket означает полный контроль над ним.
+
+- [Полный список изменений и ограничения](docs/fork-changes.md)
+- Проверено: Remnawave 3.4.5, Ghostlane CLI 1.0.466, HTTPS и отзыв скачанных ключей без refresh.
+- Это companion-панель, не встроенный плагин Remnawave. Общая квота VLESS+Ghostlane и HWID Ghostlane не реализованы.
 
 Панель управления для [OLCRTC](https://github.com/openlibrecommunity/olcrtc).
 
@@ -44,7 +52,7 @@
 ```bash
 apt update && apt install git
 cd /opt
-git clone https://github.com/invdevv/olcwave.git && cd olcwave
+git clone https://github.com/erikfrish/olcwave.git && cd olcwave
 
 chmod +x install.sh
 ./install.sh

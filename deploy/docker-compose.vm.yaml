@@ -1,0 +1,173 @@
+# OLCWave dedicated-VM stack (Debian 13, VM's own root Docker daemon).
+#
+# This replaces deploy/docker-compose.isolated.yaml (which described a
+# rootless-daemon setup that was never proven for `docker run`).
+# Contract (parent-owned VM, LAN-only): the API controls the VM's own root
+# Docker daemon through /var/run/docker.sock. The `:ro` mount flag only
+# stops the container from REPLACING the socket node; the Docker API over
+# that socket is FULL daemon control by design - the isolation boundary is
+# the dedicated VM itself (nothing else of consequence runs on this daemon).
+# Engine (olcrtc) and xraycore containers are created through this socket
+# on the same daemon and must carry the image aliases `olcrtc` / `xraycore`.
+#
+# Usage (on the VM, /opt/olcwave):
+#   cp deploy/backend.env.example deploy/backend.env  # then edit privately
+#   HOST_IP=192.0.2.10 docker compose -f deploy/docker-compose.vm.yaml up -d
+#
+# FRONTEND (panel UI)  -> http://<HOST_IP>:8080
+# Subscription raw     -> http://<HOST_IP>:8080/sub/<short_uuid>
+# Subscription page    -> http://<HOST_IP>:8081/<short_uuid>
+# Engine prerequisite: the `olcrtc` image alias must exist on the VM daemon
+# before the first subscription fetch (the API's runtime SDK builds/runs by
+# that alias). Build+tag per deploy/RUNBOOK.vm.md section 2, or
+# `docker tag <parent's built engine> olcrtc`.
+
+name: olcwave
+
+x-frontend-env: &frontend-env
+  # Panel SPA talks same-origin /api (Caddy strips the prefix). Absolute
+  # same-origin form is used on purpose: it is valid both behind the Caddy
+  # reverse proxy and for any same-host access pattern.
+  VITE_API_URL: /api
+  # Subscription URL shown/copied in the panel UI. Falls back to
+  # <origin>/sub/{uuid} when empty, which is exactly the LAN same-origin
+  # route Caddy proxies to the API. Override per deploy with
+  #   --build-arg VITE_SUB_URL_TEMPLATE=http://<other-host>/{uuid}
+  # if the subscription must be advertised on a different address.
+  VITE_SUB_URL_TEMPLATE: ""
+
+services:
+  postgres:
+    # Immutable digest pin (postgres:16-alpine, linux/amd64).
+    image: postgres:16-alpine@sha256:1a66d744c1b459e13b05a8fca341da84cb63383e99ce262210efee5a319d4551
+    container_name: olcwave-postgres
+    restart: unless-stopped
+    env_file:
+      - ./backend.env
+    environment:
+      # Dedicated pgdata subdirectory: survives re-provisioning and keeps
+      # lost+found out of the way.
+      PGDATA: /var/lib/postgresql/data/pgdata
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $$POSTGRES_USER -d $$POSTGRES_DB"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+      start_period: 10s
+    # Sober single-VM limits (2 vCPU / 4 GiB VM per bootstrap-test-vm.sh).
+    deploy:
+      resources:
+        limits:
+          cpus: "1.00"
+          memory: 512M
+    # No ports published: DB is reachable only on the compose network.
+
+  api:
+    build:
+      context: ../backend
+      dockerfile: ../deploy/api/Dockerfile
+    image: localhost/olcwave-api:1.0.8
+    container_name: olcwave-api
+    restart: unless-stopped
+    env_file:
+      - ./backend.env
+    environment:
+      # aiodocker reads DOCKER_HOST; the socket is the VM's own daemon.
+      DOCKER_HOST: unix:///var/run/docker.sock
+      # All other env comes from backend.env; RW_CA_BUNDLE here is the
+      # in-container path and MUST stay /certs/ca.pem (the :ro mount of
+      # deploy/remnawave-ca.pem below). If backend.env sets a different
+      # value, the mount must match it.
+      RW_CA_BUNDLE: /certs/ca.pem
+    volumes:
+      # The ONLY daemon the API can reach: the dedicated VM's own root
+      # daemon. `:ro` does NOT make the Docker API read-only - this is
+      # FULL daemon control by design, contained by the dedicated VM
+      # boundary (see header). Engine (olcrtc) and xraycore containers
+      # are created through this socket on the same daemon.
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+      # Home CA for https://remnawave.example.org - read-only, file mount.
+      # Prepare on the VM: cp /etc/ssl/certs/organization-root-ca.pem \
+      #                     /opt/olcwave/deploy/remnawave-ca.pem
+      - ./remnawave-ca.pem:/certs/ca.pem:ro
+    depends_on:
+      postgres:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request;urllib.request.urlopen('http://127.0.0.1:8000/health', timeout=3)"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 20s
+    # Sober single-VM limits (2 vCPU / 4 GiB VM per bootstrap-test-vm.sh):
+    # API fits comfortably; burst headroom left to the VM itself.
+    deploy:
+      resources:
+        limits:
+          cpus: "1.50"
+          memory: 1024M
+    # No ports published: API is reachable only through Caddy.
+
+  caddy:
+    # Immutable digest pin (caddy:2-alpine, linux/amd64).
+    image: caddy:2-alpine@sha256:173b26306d711395accaeba8b67afcaad2a085ccb1e6bf26010bfe8c095a5229
+    container_name: olcwave-caddy
+    restart: unless-stopped
+    environment:
+      # LAN IP for both HTTPS listeners; private test certificate, no ACME.
+      HOST_IP: ${HOST_IP:?set the dedicated VM LAN address}
+      ORIGIN_SERVER_NAME: ${ORIGIN_SERVER_NAME:?set the certificate DNS name}
+    ports:
+      # LAN-only binds. Override HOST_IP per deploy; never expose publicly.
+      # :8080 admin panel + /api + /sub raw; :8081 subscription page origin.
+      - "${HOST_IP:?}:8080:8080"
+      - "${HOST_IP:?}:8081:8081"
+    volumes:
+      - ./caddy/Caddyfile:/etc/caddy/Caddyfile:ro
+      - ./tls:/certs:ro
+      # Static assets are bind-mounted from the built image exports (see
+      # frontend/subscriptionPage services) - Caddy serves them read-only.
+      - frontend_dist:/srv/frontend/dist:ro
+      - subscriptionpage_dist:/srv/subscriptionPage/dist:ro
+    depends_on:
+      api:
+        condition: service_healthy
+      frontend:
+        condition: service_completed_successfully
+      subscriptionPage:
+        condition: service_completed_successfully
+    # Sober limit: static file serving + reverse proxy only.
+    deploy:
+      resources:
+        limits:
+          cpus: "0.50"
+          memory: 128M
+
+  frontend:
+    build:
+      context: ../frontend
+      dockerfile: ../deploy/frontend/Dockerfile
+      args:
+        <<: *frontend-env
+    image: localhost/olcwave-frontend:1.0.0
+    container_name: olcwave-frontend-build
+    restart: "no"
+    volumes:
+      - frontend_dist:/out
+
+  subscriptionPage:
+    build:
+      context: ../subscriptionPage
+      dockerfile: ../deploy/subscriptionPage/Dockerfile
+    image: localhost/olcwave-subscriptionpage:1.0.0
+    container_name: olcwave-subscriptionpage-build
+    restart: "no"
+    volumes:
+      - subscriptionpage_dist:/out
+
+volumes:
+  pgdata:
+  frontend_dist:
+  subscriptionpage_dist:

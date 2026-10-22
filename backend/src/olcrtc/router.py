@@ -2,7 +2,13 @@ from fastapi import APIRouter, Depends, HTTPException, status
 
 from auth.dependencies import get_current_admin
 from xraycore.sdk import XrayCore
-from olcrtc.schemas import ContainerSchema, ContainerConfigSchema, ContainerLogsSchema, ContainerStatsSchema
+from olcrtc.schemas import (
+    ContainerSchema,
+    ContainerConfigSchema,
+    ContainerLogsSchema,
+    ContainerStatsSchema,
+    ContainersListSchema,
+)
 from olcrtc.service import Containers
 from users.service import Users
 
@@ -11,6 +17,11 @@ router = APIRouter(prefix="/containers", tags=["containers"])
 @router.get("/all")
 async def get_all(_admin: dict = Depends(get_current_admin)) -> list[ContainerSchema]:
     return await Containers.all()
+
+@router.get("/all_status")
+async def get_all_status(_admin: dict = Depends(get_current_admin)) -> ContainersListSchema:
+    """Combined listing with per-node health (GUI node-status view)."""
+    return await Containers.all_with_status()
 
 @router.post("/run")
 async def run(name: str, _admin: dict = Depends(get_current_admin)):

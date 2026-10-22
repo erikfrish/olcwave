@@ -2,10 +2,24 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 
 class Settings(BaseSettings):
     RW_ENABLED: bool 
-    RW_API_URL: str = ""
     RW_API_TOKEN: str = ""
+    RW_API_URL: str = ""
     RW_CADDY_TOKEN: str = ""
+    # Optional custom CA bundle for the Remnawave API client (PEM file path).
+    # Empty = system trust store.
+    RW_CA_BUNDLE: str = ""
 
+    # Bounded revocation latency: how long a Remnawave outage may keep
+    # previously-verified access alive before containers are removed.
+    REMNAWAVE_UNAVAILABLE_GRACE_SECONDS: int = 120
+    # How often the background reconciler re-checks users with containers.
+    REVOCATION_CHECK_INTERVAL: int = 30
+    # Multi-node fleet (olcrtc/nodes.py): JSON object
+    #   {"vm1": {"docker_url": "unix:///run/olcwave-nodes/vm1.sock",
+    #            "tags": ["vm1"], "image": "olcrtc"}, ...}
+    # Empty string = single-node local mode (unchanged behavior).
+    # Set by deploy env; never committed.
+    OLCWAVE_NODES_JSON: str = ""
     DB_HOST: str
     DB_PORT: int
     POSTGRES_USER: str
@@ -23,6 +37,12 @@ class Settings(BaseSettings):
     JWT_EXPIRE_MINUTES: int = 1440
 
     RW_SQUAD_NAME: str = ""
+
+    # Multi-node execution daemons, reachable ONLY via local Unix sockets
+    # (no remote TCP Docker). Empty = single-node mode (local daemon only).
+    # Shape: {"vm1": {"docker_url": "unix:///run/olcwave-nodes/vm1.sock",
+    #                  "tags": ["vm1"], "image": "olcrtc"}, ...}
+    OLCWAVE_NODES_JSON: str = ""
 
     CORS_ORIGINS: list[str] = ["http://localhost:3000", "http://localhost:5173"]
 

@@ -1,0 +1,15 @@
+[extend]
+useDefault = true
+[[allowlists]]
+description = "Public vendored olcRTC documentation examples and checksum-pinned Xray artifact"
+regexTarget = "match"
+regexes = [
+  'REPLACE_ME_WITH_64_HEX_CHARS',
+  'd823fa01cb3e0609b67322f7cf984c4ee2e4ce2e294936fc24ef38c9e59f4799',
+  '23cd9af937744d97776ee35ecad4972cf4b2109d1e0fe6be9930467608f7c8ae',
+  '00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff',
+  '0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef',
+  'aabbccddeeff00112233445566778899aabbccddeeff00112233445566778899',
+  'd823fa01cb3e0609b67322f7cf984c4ee2e294936fc24ef38c9e59f4799',
+  '0123456789ab',
+]

@@ -1,0 +1,9 @@
+# Dedicated VM controller only. Remote daemons are isolated olcwave-node users.
+services:
+  api:
+    volumes:
+      - /run/olcwave-nodes:/run/olcwave-nodes:ro
+  frontend:
+    build:
+      args:
+        VITE_SUB_URL_TEMPLATE: ${PUBLIC_SUB_URL_TEMPLATE:?set the public subscription URL template}

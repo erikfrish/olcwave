@@ -26,7 +26,7 @@ type GroupMode = 'short_uuid' | 'config_tag'
 type SortKey = 'short_uuid' | 'config_tag' | 'created' | 'status'
 type SortDir = 'asc' | 'desc'
 
-const COL_SPAN = 11
+const COL_SPAN = 12
 
 const groupOptions: { key: GroupMode; labelKey: TranslationKey; icon: React.ComponentType<{ className?: string }> }[] = [
   { key: 'short_uuid', labelKey: 'byUser', icon: UsersIcon },
@@ -46,11 +46,13 @@ export default function Containers() {
   const { toasts, dismiss, success, error } = useToasts()
   const queryClient = useQueryClient()
 
-  const { data: containers, isLoading, isError, error: queryError, refetch, isFetching } = useQuery({
+  const { data: listing, isLoading, isError, error: queryError, refetch, isFetching } = useQuery({
     queryKey: ['containers-all'],
-    queryFn: () => containersApi.getAll().then((r) => r.data),
+    queryFn: () => containersApi.getAllStatus().then((r) => r.data),
     refetchInterval: refreshMs || false,
   })
+  const containers = listing?.containers
+  const nodeStatuses = listing?.nodes
 
   const deleteMutation = useMutation({
     mutationFn: (name: string) => containersApi.remove(name),
@@ -73,7 +75,8 @@ export default function Containers() {
         c.name.toLowerCase().includes(q) ||
         c.short_uuid.toLowerCase().includes(q) ||
         c.config_tag.toLowerCase().includes(q) ||
-        c.status.toLowerCase().includes(q)
+        c.status.toLowerCase().includes(q) ||
+        (c.node ?? '').toLowerCase().includes(q)
     )
   }, [containers, search])
 
@@ -132,6 +135,25 @@ export default function Containers() {
           {t('refresh')}
         </Button>
       </div>
+
+      {nodeStatuses && nodeStatuses.length > 0 && (
+        <div className="flex flex-wrap items-center gap-2">
+          {nodeStatuses.map((n) => (
+            <span
+              key={n.node}
+              title={n.ok ? `${n.node}: ${n.containers} container(s)` : `${n.node}: ${n.error ?? 'unreachable'}`}
+              className={`inline-flex items-center gap-1.5 h-6 px-2.5 rounded-md text-xs font-medium border
+                ${n.ok
+                  ? 'bg-success/10 text-success border-success/30'
+                  : 'bg-danger/10 text-danger border-danger/40'}`}
+            >
+              <span className={`w-1.5 h-1.5 rounded-full ${n.ok ? 'bg-success' : 'bg-danger animate-pulse'}`} />
+              {n.node}
+              <span className="tabular-nums opacity-70">{n.ok ? n.containers : '✕'}</span>
+            </span>
+          ))}
+        </div>
+      )}
 
       {isError ? (
         <Card>

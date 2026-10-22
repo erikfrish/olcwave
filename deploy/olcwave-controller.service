@@ -1,0 +1,15 @@
+[Unit]
+Description=Production OLCWave isolated controller
+After=docker.service network-online.target olcwave-node-relay@vm1.service olcwave-node-relay@vm2.service olcwave-node-relay@vm3.service
+Requires=docker.service
+Wants=network-online.target olcwave-node-relay@vm1.service olcwave-node-relay@vm2.service olcwave-node-relay@vm3.service
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+WorkingDirectory=/opt/olcwave
+EnvironmentFile=/etc/olcwave/controller.env
+ExecStart=/usr/bin/docker compose -f deploy/docker-compose.vm.yaml -f deploy/docker-compose.production.yaml up -d
+ExecStop=/usr/bin/docker compose -f deploy/docker-compose.vm.yaml -f deploy/docker-compose.production.yaml stop
+TimeoutStartSec=180
+[Install]
+WantedBy=multi-user.target

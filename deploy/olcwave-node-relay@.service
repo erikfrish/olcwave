@@ -1,0 +1,14 @@
+[Unit]
+Description=OLCWave %i isolated rootless Docker relay
+After=network-online.target
+Wants=network-online.target
+[Service]
+Type=simple
+RuntimeDirectory=olcwave-nodes
+RuntimeDirectoryMode=0700
+ExecStartPre=/usr/bin/rm -f /run/olcwave-nodes/%i.sock
+ExecStart=/usr/bin/socat UNIX-LISTEN:/run/olcwave-nodes/%i.sock,fork,mode=0600 EXEC:"/usr/bin/ssh -F /etc/olcwave/ssh/config -T %i docker-system-dial-stdio",nofork
+Restart=on-failure
+RestartSec=5
+[Install]
+WantedBy=multi-user.target

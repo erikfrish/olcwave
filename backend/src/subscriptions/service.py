@@ -1,4 +1,5 @@
 import asyncio
+import logging
 import secrets
 from typing import Any
 
@@ -10,11 +11,48 @@ from fastapi import Response
 from config import settings
 from settings.service import SettingsService
 from users.schemas import TrafficInfoSchema, UserSchema
-from olcrtc.sdk import OlcRTC
 from profiles.roomGenerator import RoomChecker, RoomGenerator
 from profiles.service import Containers
 from profiles.service import Profiles
 from users.service import Users
+import rw.reconcile as reconcile_module
+from rw.reconcile import ReconcileManager, SubscriptionGuard
+
+# Boring per-user lock: one plain asyncio.Lock per short_uuid. NOT reentrant.
+# Every entry into a per-user critical section takes it exactly once; helpers
+# that must run under the lock (revocation removal) are provided unlocked and
+# are called only while the lock is held, so no held-set cleverness is needed
+# and an inner release can never unlock an outer critical section.
+_profile_locks: dict[str, asyncio.Lock] = {}
+
+
+def _lock_for(short_uuid: str) -> asyncio.Lock:
+    lock = _profile_locks.get(short_uuid)
+    if lock is None:
+        lock = asyncio.Lock()
+        _profile_locks[short_uuid] = lock
+    return lock
+
+
+async def acquire_user_lock(short_uuid: str) -> None:
+    """Take the per-user lock exactly once per critical section."""
+    await _lock_for(short_uuid).acquire()
+
+
+def release_user_lock(short_uuid: str) -> None:
+    """Release the per-user lock; must pair 1:1 with acquire_user_lock."""
+    lock = _profile_locks.get(short_uuid)
+    if lock is not None and lock.locked():
+        lock.release()
+
+
+async def _ensure_locked(short_uuid: str):
+    """Run the ensure step under the per-user lock (no re-verification)."""
+    await acquire_user_lock(short_uuid)
+    try:
+        return await Subscriptions.ensure_profiles_running(short_uuid)
+    finally:
+        release_user_lock(short_uuid)
 
 
 TRANSPORT_NAMES = {
@@ -142,22 +180,23 @@ class Subscriptions:
             f"@{cfg['room']['id']}#"
             f"{cfg['crypto']['key']}${name}"
         )
-
     @staticmethod
     async def get_launched_tags(short_uuid: str):
-        servers = []
+        """Tags of the user's panel containers on EVERY node.
 
-        for srv in await OlcRTC.all():
-            if await Containers.is_panel_container(srv):
-                info = await srv.show()
-                name = info["Name"].lstrip("/")
+        Returns (tag, handle) pairs: the handle carries the source node, so
+        config reads and removals below hit the SAME daemon - remote
+        containers are served/revoked exactly like local ones.
+        """
+        launched = []
+        handles, _node_errors = await Containers.panel_containers(short_uuid)
+        for handle in handles:
+            info = await handle.show()
+            parsed = Containers.parse_panel_labels(info)
+            if parsed is not None and parsed[1] == short_uuid:
+                launched.append((parsed[0], handle))
 
-                if name.endswith(short_uuid):
-                    servers.append(
-                        name.split("-", 2)[1]
-                    )
-
-        return servers
+        return launched
 
     @staticmethod
     def prepare_sub_text(
@@ -171,6 +210,9 @@ class Subscriptions:
             f"#update: 2147483647\n"
             f"#refresh: {SettingsService.get().sub_update_interval}\n"
         )
+        # Traffic here is what this panel's own SOCKS proxy counted inside
+        # its olcrtc containers - local accounting only, not Remnawave
+        # node traffic.
         if limit == 0:
             txt += f"#used: {bytes_to_notation(used)}\n"
         else:
@@ -198,34 +240,27 @@ class Subscriptions:
 
     @staticmethod
     async def _cleanup_user_containers(short_uuid: str):
-        for container in await OlcRTC.all(True):
-            info = await container.show()
-            name = info["Name"].lstrip("/")
+        await reconcile_module.revoke_user_unchecked(
+            short_uuid, "profile_room_gone"
+        )
 
-            if (
-                name.startswith("olcwave-")
-                and name.endswith(f"-{short_uuid}")
-            ):
-                await OlcRTC.remove(name)
-
-    @staticmethod
-    async def _validate_rw_user(short_uuid: str) -> Any | None:
-        from rw.sdk import isUserValid
-        rw_user = await isUserValid(short_uuid)
-        if rw_user:
-            return rw_user
-        return None
 
     @staticmethod
     async def _ensure_local_user_from_rw(short_uuid: str, rw_user: Any):
+        """Create the local user row from the authoritative record.
+
+        `rw_user` is the Remnawave UserResponseDto carried by RwAccess.user -
+        the same object the access decision came from, so no second panel
+        call can contradict it.
+        """
         try:
             await Users.get(short_uuid)
         except Exception:
             await Users.add(
                 UserSchema(
                     short_uuid=short_uuid,
-                    name=rw_user.user.username,
-                    expires_at=rw_user.user.expires_at,
+                    name=rw_user.username,
+                    expires_at=rw_user.expire_at,
                 )
             )
 
@@ -252,30 +287,20 @@ class Subscriptions:
     @staticmethod
     async def ensure_profiles_running(short_uuid: str):
 
-        running_tags = await Subscriptions.get_launched_tags(
-            short_uuid
-        )
+        # (tag, handle) pairs across ALL nodes; handle routes every follow-up
+        # call to the daemon the container actually lives on.
+        running = await Subscriptions.get_launched_tags(short_uuid)
 
-        async def load_config(tag):
-
-            container_name = (
-                f"olcwave-{tag}-{short_uuid}"
-            )
-
-            config = await OlcRTC.get_config(
-                container_name
-            )
-
-            if isinstance(config, bytes):
-                config = config.decode()
-
-            return tag, config
+        async def load_config(handle):
+            config = await Containers.get_config_of(handle)
+            return handle, config
 
         loaded = await asyncio.gather(
-            *(load_config(tag) for tag in running_tags)
+            *(load_config(handle) for _, handle in running)
         )
 
-        configs = dict(loaded)
+        configs = {tag: cfg for (tag, _), (_, cfg) in zip(running, loaded)}
+        handles = {tag: handle for tag, handle in running}
 
         async def check_profile(tag, config):
 
@@ -292,9 +317,8 @@ class Subscriptions:
                 )
 
                 if not exists:
-                    await OlcRTC.remove(
-                        f"olcwave-{tag}-{short_uuid}"
-                    )
+                    # Remove on the SAME node the handle was found on.
+                    await Containers.remove_handle(handles[tag])
 
         await asyncio.gather(
             *(check_profile(tag, cfg)
@@ -332,27 +356,84 @@ class Subscriptions:
     @staticmethod
     async def get(short_uuid: str):
         if settings.RW_ENABLED:
-            rw_user = await Subscriptions._validate_rw_user(short_uuid)
-            if rw_user is None:
-                await Subscriptions._cleanup_user_containers(short_uuid)
-                return Response(status_code=404)
+            # One authorization + provisioning critical section per request:
+            # the deny check and the ensure run under the SAME per-user lock,
+            # so a revocation can never interleave with container creation
+            # and a denied user can never race a fresh allow into creation.
+            # No mutation ever happens during a Remnawave outage: within the
+            # persisted grace window only the already-running containers'
+            # cached configs are served; past it (or on a deny fact) the
+            # request is refused and revocation happens without creating
+            # anything.
+            await acquire_user_lock(short_uuid)
+            try:
+                # Authoritative evaluate INSIDE the same per-user lock that
+                # covers provisioning: the decision can never race a revoker.
+                decision = await SubscriptionGuard.check(short_uuid)
 
-            await Subscriptions._ensure_local_user_from_rw(short_uuid, rw_user)
+                if not decision.allowed:
+                    # Deny fact OR outage past grace: revoke owned containers
+                    # and refuse. Never serve data on a stale authorization.
+                    await reconcile_module.revoke_user_unchecked(
+                        short_uuid,
+                        f"subscription_denied: {decision.reason}",
+                    )
+                    return Response(status_code=404)
+
+                outage_only = decision.access is None
+
+                if not outage_only:
+                    # Single authoritative call: the user record rides on the
+                    # decision (RwAccess.user) - no second panel call that
+                    # could contradict the decision above.
+                    access = decision.access
+                    rw_user = getattr(access, "user", None)
+                    if rw_user is not None:
+                        await Subscriptions._ensure_local_user_from_rw(
+                            short_uuid, rw_user
+                        )
+
+                traffic = await Users.get_traffic(short_uuid)
+                if traffic.exceeded:
+                    return Subscriptions.traffic_limit_response(traffic)
+
+                try:
+                    if outage_only:
+                        # Outage within the persisted grace: cached state
+                        # only - NO container creation or replacement.
+                        configs, profiles = await Subscriptions.get_existing(
+                            short_uuid
+                        )
+                    else:
+                        configs, profiles = (
+                            await Subscriptions.ensure_profiles_running(
+                                short_uuid
+                            )
+                        )
+                except Exception:
+                    logging.getLogger(__name__).exception(
+                        "subscription build failed for %s", short_uuid
+                    )
+                    return Response(status_code=503)
+            finally:
+                release_user_lock(short_uuid)
         else:
             try:
                 await Users.get(short_uuid)
             except Exception:
                 return Response(status_code=404)
 
-        traffic = await Users.get_traffic(short_uuid)
-        if traffic.exceeded:
-            return Subscriptions.traffic_limit_response(
-                traffic
-            )
+            traffic = await Users.get_traffic(short_uuid)
+            if traffic.exceeded:
+                return Subscriptions.traffic_limit_response(traffic)
 
-        configs, profiles = await Subscriptions.ensure_profiles_running(
-            short_uuid
-        )
+            try:
+                configs, profiles = await _ensure_locked(short_uuid)
+            except Exception:
+                logging.getLogger(__name__).exception(
+                    "subscription build failed for %s", short_uuid
+                )
+                return Response(status_code=503)
 
         uris = [
             Subscriptions.config_to_uri(
@@ -370,4 +451,43 @@ class Subscriptions:
                 traffic.limit,
             ),
             media_type="text/plain",
+            headers={
+                "profile-title": SettingsService.get().sub_name,
+                "subscription-userinfo": (
+                    f"upload=0; download={traffic.used}; total={traffic.limit}; "
+                    f"expire={int((await Users.get(short_uuid)).expires_at.timestamp())}"
+                ),
+                "profile-update-interval": "1",
+            },
         )
+
+    @staticmethod
+    async def get_existing(short_uuid: str):
+        """Read the running containers' configs without creating anything.
+
+        Used during a Remnawave outage (within the persisted grace window):
+        cached state may be served, but no container is ever created or
+        replaced while the panel cannot confirm access.
+        """
+        # (tag, handle) pairs across ALL nodes; configs are read on each
+        # handle's own daemon. Read-only: nothing is created or replaced.
+        running = await Subscriptions.get_launched_tags(short_uuid)
+
+        async def load_config(handle):
+            config = await Containers.get_config_of(handle)
+            return handle, config
+
+        loaded = await asyncio.gather(
+            *(load_config(handle) for _, handle in running)
+        )
+        configs = {tag: cfg for (tag, _), (_, cfg) in zip(running, loaded)}
+
+        profiles_list = await Profiles.get_all()
+        profiles = {
+            profile.tag: profile
+            for profile in profiles_list
+            if profile.tag in configs
+        }
+
+        return configs, profiles
+
