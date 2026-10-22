@@ -234,7 +234,7 @@ class Subscriptions:
             )
 
             if icon:
-                txt += f"##icon: {icon}"
+                txt += f"##icon: {icon}\n"
 
         return txt
 
@@ -438,7 +438,7 @@ class Subscriptions:
         uris = [
             Subscriptions.config_to_uri(
                 configs[tag],
-                "🇩🇪 " + profiles[tag].name if tag in {"vm1", "vm2", "vm3"} else profiles[tag].name,
+                "🇩🇪 DE · " + profiles[tag].name if tag in {"vm1", "vm2", "vm3"} else profiles[tag].name,
             )
             for tag in profiles
         ]
