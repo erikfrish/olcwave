@@ -1,0 +1,6 @@
+[Unit]
+Description=OLCWave selected monthly quota reset
+After=olcwave-controller.service
+[Service]
+Type=oneshot
+ExecStart=/usr/bin/python3 /opt/olcwave/deploy/monthly-quota-reset.py

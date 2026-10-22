@@ -103,3 +103,18 @@ private subscription URL/body, scoped API token, controller credentials, node
 registry/tunnel units, runtime proof and image archive. Files0600, directory0700.
 A plaintext secret archive is NOT safe to share. Origin CA is long-lived; origin
 leaf was renewed for365 days, renewal is an operator action before expiry.
+
+## OLEG monthly quota
+
+Separate Remnawave `oleg-ghostlane` receives all three managed Ghostlane nodes.
+Access has no contractual expiry (panel uses2099 sentinel). Quota500GB decimal
+(500000000000 bytes) resets once per calendar month, Europe/Moscow, first day
+00:00. `monthly-quota-reset.py` calls the supported OLCWave reset API and keeps
+a root-only month journal. Timer runs at the boundary, at boot and hourly for
+missed-reset recovery; repeated runs in the same month are no-ops. Private config
+`/etc/olcwave/monthly-quota.json` selects only this user. Initial reset and repeated
+no-op were exercised; next calendar boundary is2026-11-01 00:00 MSK.
+The old Oleg static access remains outside this quota until separately revoked.
+Three issued profiles passed actual HTTPS, including retries after node readiness.
+Private URL/policy/proof: `.ignore/olcwave-production/oleg/` in talos-home.
+
