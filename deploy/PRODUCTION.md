@@ -31,6 +31,9 @@
 - `olcwave-postgres` (PVC `olcwave-postgres-data`) replaces the Compose database.
 - CronJob `olcwave-monthly-quota` replaces the systemd timer; its month journal is
   on PVC `olcwave-quota-state`.
+- CronJob `olcwave-backup` (daily 02:47 MSK) writes a verified `pg_dump -Fc`
+  plus a copy of the quota journal to PVC `olcwave-backups` (`nfs-backups`),
+  keeping 30 days.
 - Remnawave: `RW_API_URL=http://remnawave.remnawave.svc.cluster.local:3000`.
 - vm2 is reached through the cluster `vpn-gateway` SOCKS proxy.
 
@@ -57,15 +60,19 @@ The VM100 `olcwave-node-relay@.service` template with
 
 The `metrics` sidecar runs the private exporter at
 `olcwave-metrics.olcwave.svc.cluster.local:9465`.
-It checks API auth, all node states, relay sockets, monthly usage/limits and
-public subscription issuance for erikfrish/OLEG using supported API calls.
+It checks API auth, Remnawave reachability (`olcwave_remnawave_up`), node
+states and per-state container counts, relay sockets, monthly usage/limits and
+public subscription issuance for erikfrish/OLEG using supported API calls; the
+expected profile count is derived from the profiles and
+`OLCWAVE_PROFILE_USERS_JSON`, not hard-coded.
 No direct production DB queries; credentials stay inside the API environment.
 Collection is serialized, command timeout 50s, delay between samples 30s;
 HTTP scrapes read only the cached snapshot. Failed snapshots omit user data
 and export failure/freshness signals rather than inventing zero usage.
 Grafana/VM rules live in talos-home's monitoring chart; dashboard UID
-`olcwave-health`. New alerts are evaluated but blackholed pending notification
-approval. For monitoring rollback remove only the `metrics` sidecar; VPN untouched.
+`olcwave-health`. Alerts route to Telegram (`alert_class` infrastructure,
+quota warning business). For monitoring rollback remove only the `metrics`
+sidecar; VPN untouched.
 
 
 
@@ -80,11 +87,13 @@ registration flow. Profiles has credential-entry help for Telemost Session_id
 and WB access-token autogeneration, not an account login/registration wizard.
 Node health appears as badges in Containers; node creation, SSH relay setup and
 profile-to-node mapping remain operator-owned configuration, not GUI controls.
-Trial carriers SaluteJazz, VK Calls and Telemost are now managed profiles
-`vm3jazz`, `vm3vk`, `vm3telemost`, mapped exclusively to vm3. The private
-`OLCWAVE_PROFILE_USERS_JSON` maps those tags to erikfrish/OLEG short UUIDs;
-unspecified tags remain available to all eligible users. Both subscriptions
-contain six profiles; other users receive only the three Jitsi profiles.
+Restricted carriers are managed profiles `vm3jazz`, `vm3vk`, `vm3telemost`,
+`vm3vkartem` (vm3) and `vm1egovm` (vm1: meet.egovm.ru answers 403 to vm3).
+The private `OLCWAVE_PROFILE_USERS_JSON` maps those tags to short UUIDs;
+unspecified tags remain available to all eligible users. erikfrish/OLEG
+subscriptions contain eight profiles; other users receive only the three Jitsi
+profiles. `vm3mamba` was removed on 2026-10-31: meet.mamba.group refuses
+connections from every node.
 Each user has a separate labeled container/key in the shared trial room, so
 traffic, revocation and quota enforcement use the normal OLCWave lifecycle.
 Former standalone trial containers are retired; their keys are obsolete.
