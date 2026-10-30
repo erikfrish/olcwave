@@ -91,7 +91,7 @@ Restricted carriers are managed profiles `vm3jazz`, `vm3vk`, `vm3telemost`,
 `vm3vkartem` (vm3) and `vm1egovm` (vm1: meet.egovm.ru answers 403 to vm3).
 The private `OLCWAVE_PROFILE_USERS_JSON` maps those tags to short UUIDs;
 unspecified tags remain available to all eligible users. erikfrish/OLEG
-subscriptions contain eight profiles; other users receive only the three Jitsi
+subscriptions contain seven profiles; other users receive only the three Jitsi
 profiles. `vm3mamba` was removed on 2026-10-31: meet.mamba.group refuses
 connections from every node.
 Each user has a separate labeled container/key in the shared trial room, so
