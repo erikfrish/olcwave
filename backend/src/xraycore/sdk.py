@@ -1,17 +1,45 @@
 import io
 import tarfile
 
+import aiodocker
 import docker_client
 from aiodocker import DockerError
 from aiodocker.containers import DockerContainer
+from fastapi import HTTPException
+
+from olcrtc import nodes
 
 
 class XrayCore:
+    """Panel-side Xray routing container on the LOCAL Docker daemon.
+
+    Unavailable when OLCWAVE_LOCAL_NODE=false: is_running() is False and
+    every other call raises HTTP 409 instead of touching a missing daemon.
+    """
+
     CONTAINER_NAME = "olcwave-xraycore"
 
     @staticmethod
+    def available() -> bool:
+        return nodes.local_enabled()
+
+    @staticmethod
+    def ensure_available() -> None:
+        XrayCore._docker()
+
+    @staticmethod
+    def _docker() -> aiodocker.Docker:
+        if not XrayCore.available() or docker_client.docker is None:
+            raise HTTPException(
+                status_code=409,
+                detail="routing is unavailable: the panel has no local Docker node "
+                "(OLCWAVE_LOCAL_NODE=false)",
+            )
+        return docker_client.docker
+
+    @staticmethod
     async def run(xray_json: str) -> DockerContainer:
-        docker = docker_client.docker
+        docker = XrayCore._docker()
         try:
             old = await docker.containers.get(XrayCore.CONTAINER_NAME)
             await old.delete(force=True)
@@ -54,7 +82,7 @@ class XrayCore:
 
     @staticmethod
     async def start() -> None:
-        docker = docker_client.docker
+        docker = XrayCore._docker()
         try:
             container = await docker.containers.get(XrayCore.CONTAINER_NAME)
             await container.start()
@@ -63,25 +91,27 @@ class XrayCore:
 
     @staticmethod
     async def stop() -> None:
-        docker = docker_client.docker
+        docker = XrayCore._docker()
         container = await docker.containers.get(XrayCore.CONTAINER_NAME)
         await container.stop()
 
     @staticmethod
     async def logs() -> str:
-        docker = docker_client.docker
+        docker = XrayCore._docker()
         container = await docker.containers.get(XrayCore.CONTAINER_NAME)
         logs = await container.log(stdout=True, stderr=True)
         return "".join(logs)
 
     @staticmethod
     async def get() -> DockerContainer:
-        docker = docker_client.docker
+        docker = XrayCore._docker()
         return await docker.containers.get(XrayCore.CONTAINER_NAME)
 
     @staticmethod
     async def is_running() -> bool:
-        docker = docker_client.docker
+        if not XrayCore.available():
+            return False
+        docker = XrayCore._docker()
         try:
             container = await docker.containers.get(XrayCore.CONTAINER_NAME)
             info = await container.show()
@@ -91,7 +121,7 @@ class XrayCore:
 
     @staticmethod
     async def _get_archive(path: str) -> bytes:
-        docker = docker_client.docker
+        docker = XrayCore._docker()
         async with docker._query(
             f"containers/{XrayCore.CONTAINER_NAME}/archive",
             method="GET",

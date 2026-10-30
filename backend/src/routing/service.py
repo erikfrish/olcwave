@@ -149,6 +149,7 @@ class Routing:
 
     @staticmethod
     async def create(routing: str):
+        XrayCore.ensure_available()
         await Routing.validate_routing_geotags(routing)
 
         xray_json = Routing.routing_to_xray_json(routing)
@@ -174,6 +175,7 @@ class Routing:
 
     @staticmethod
     async def update(routing: str):
+        XrayCore.ensure_available()
         await Routing.validate_routing_geotags(routing)
 
         xray_json = Routing.routing_to_xray_json(routing)
@@ -196,6 +198,10 @@ class Routing:
     async def delete():
         async with async_session_factory() as db:
             await RoutingDB.delete(db)
+
+        if not XrayCore.available():
+            # No routing container ever ran, so no container uses the proxy.
+            return
 
         try:
             await XrayCore.stop()

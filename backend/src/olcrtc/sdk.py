@@ -5,7 +5,6 @@ import yaml
 from aiodocker import DockerError
 from aiodocker.containers import DockerContainer
 
-import docker_client
 from olcrtc import nodes
 
 # Bounded resources for EVERY container the panel creates on ANY node:
@@ -45,11 +44,10 @@ def host_config(extra_hosts: list[str] | None = None) -> dict:
 def _client(node: str) -> aiodocker.Docker:
     """aiodocker client of the node; unknown node -> explicit error.
 
-    There is NO fallback to the local node: a typo or a dead remote must
-    surface as an error, not drain traffic to the panel host.
+    There is NO fallback to the local node: a typo, a dead remote or a
+    disabled local node must surface as an error, not drain traffic to the
+    panel host.
     """
-    if node == nodes.LOCAL_NODE:
-        return docker_client.docker or nodes.local_docker()
     return nodes.client(node)
 
 

@@ -14,12 +14,17 @@ class Settings(BaseSettings):
     REMNAWAVE_UNAVAILABLE_GRACE_SECONDS: int = 120
     # How often the background reconciler re-checks users with containers.
     REVOCATION_CHECK_INTERVAL: int = 30
-    # Multi-node fleet (olcrtc/nodes.py): JSON object
+    # Multi-node execution daemons, reachable ONLY via local Unix sockets
+    # (no remote TCP Docker); see olcrtc/nodes.py. Shape:
     #   {"vm1": {"docker_url": "unix:///run/olcwave-nodes/vm1.sock",
     #            "tags": ["vm1"], "image": "olcrtc"}, ...}
     # Empty string = single-node local mode (unchanged behavior).
     # Set by deploy env; never committed.
     OLCWAVE_NODES_JSON: str = ""
+    # false = the panel host has no Docker daemon (e.g. Kubernetes): no
+    # implicit 'local' node and no local Xray routing container. Requires
+    # OLCWAVE_NODES_JSON.
+    OLCWAVE_LOCAL_NODE: bool = True
     # Optional profile tag -> allowed user short UUIDs; unspecified tags are public.
     OLCWAVE_PROFILE_USERS_JSON: str = "{}"
     DB_HOST: str
@@ -39,13 +44,6 @@ class Settings(BaseSettings):
     JWT_EXPIRE_MINUTES: int = 1440
 
     RW_SQUAD_NAME: str = ""
-
-    # Multi-node execution daemons, reachable ONLY via local Unix sockets
-    # (no remote TCP Docker). Empty = single-node mode (local daemon only).
-    # Shape: {"vm1": {"docker_url": "unix:///run/olcwave-nodes/vm1.sock",
-    #                  "tags": ["vm1"], "image": "olcrtc"}, ...}
-    OLCWAVE_NODES_JSON: str = ""
-
     CORS_ORIGINS: list[str] = ["http://localhost:3000", "http://localhost:5173"]
 
     model_config = SettingsConfigDict(env_file=".env")  # pyright: ignore[reportUnannotatedClassAttribute]

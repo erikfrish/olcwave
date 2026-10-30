@@ -48,12 +48,17 @@ async def lifespan(app: FastAPI):
         nodes.client(node_name)
     await SettingsService.load()
 
-    try:
-        routing = await Routing.get()
-    except HTTPException:
-        routing = False
-    if routing:
-        await XrayCore.run(routing)
+    if XrayCore.available():
+        try:
+            routing = await Routing.get()
+        except HTTPException:
+            routing = False
+        if routing:
+            await XrayCore.run(routing)
+    else:
+        logging.getLogger(__name__).info(
+            "local node disabled: panel Xray routing is unavailable"
+        )
 
     if settings.RW_ENABLED:
         # startup reconciliation: evaluate restored containers before serving
@@ -78,10 +83,11 @@ async def lifespan(app: FastAPI):
     if settings.RW_ENABLED:
         await ReconcileManager.stop()
         await SyncManager.stop()
-    try:
-        await XrayCore.stop()
-    except DockerError:
-        pass
+    if XrayCore.available():
+        try:
+            await XrayCore.stop()
+        except DockerError:
+            pass
     await close_docker()
 
 

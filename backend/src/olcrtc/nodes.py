@@ -15,9 +15,12 @@
 #     "vm2": {...}, "vm3": {...}
 #   }
 #
-# The "local" node is always implicitly registered (docker_url=None ->
-# aiodocker default resolution, same socket docker_client uses), so a build
-# without OLCWAVE_NODES_JSON keeps the previous single-node behavior.
+# The "local" node is implicitly registered (docker_url=None -> aiodocker
+# default resolution, same socket docker_client uses), so a build without
+# OLCWAVE_NODES_JSON keeps the previous single-node behavior.
+# OLCWAVE_LOCAL_NODE=false removes it entirely (panel hosts without a Docker
+# daemon, e.g. Kubernetes): every container must then route to a configured
+# remote node, and anything addressed to 'local' raises UnknownNodeError.
 #
 # Node selection for a NEW container is EXACT config_tag -> tags matching
 # (each Jitsi profile runs on its one designated node; the tag is also the
@@ -46,6 +49,11 @@ class UnknownNodeError(KeyError):
     """Raised when a method is called with a node name that is not configured."""
 
 
+def local_enabled() -> bool:
+    """Whether the panel host's own Docker daemon is an execution node."""
+    return settings.OLCWAVE_LOCAL_NODE
+
+
 def _load_nodes() -> dict[str, dict]:
     """Parse OLCWAVE_NODES_JSON (cached until reset_cache()).
 
@@ -53,7 +61,8 @@ def _load_nodes() -> dict[str, dict]:
     docker_url, non-string tags, or a tag declared by more than one node:
     a malformed node config must never silently degrade to local-only
     operation (no fake fallback). Returns {} only when the env is
-    empty/unset - that is the legitimate single-node mode.
+    empty/unset - that is the legitimate single-node mode, which in turn
+    requires the local node.
     """
     global _nodes
     if _nodes is not None:
@@ -61,6 +70,10 @@ def _load_nodes() -> dict[str, dict]:
     _nodes = {}
     raw = (settings.OLCWAVE_NODES_JSON or "").strip()
     if not raw:
+        if not local_enabled():
+            raise ValueError(
+                "OLCWAVE_LOCAL_NODE=false requires a non-empty OLCWAVE_NODES_JSON"
+            )
         return _nodes
     try:
         parsed = json.loads(raw)
@@ -105,8 +118,9 @@ def reset_cache() -> None:
 
 
 def names() -> list[str]:
-    """All known node names: 'local' first, then configured (JSON order)."""
-    return [LOCAL_NODE] + list(_load_nodes().keys())
+    """All known node names: 'local' first (if enabled), then configured."""
+    configured = list(_load_nodes().keys())
+    return [LOCAL_NODE] + configured if local_enabled() else configured
 
 
 def tags_for(node: str) -> list[str]:
@@ -143,17 +157,21 @@ def node_for_tag(config_tag: str) -> str:
 def resolve_node(node: str | None = None, config_tag: str | None = None) -> str:
     """Node for a NEW container: explicit node wins, else tag routing."""
     if node:
-        if node != LOCAL_NODE and node not in _load_nodes():
+        if node not in names():
             raise UnknownNodeError(node)
         return node
     if config_tag:
         return node_for_tag(config_tag)
+    if not local_enabled():
+        raise UnknownNodeError("no config tag given and the local node is disabled")
     return LOCAL_NODE
 
 
 def local_docker() -> aiodocker.Docker:
     """The LOCAL daemon client (the instance docker_client manages)."""
     global _local_docker
+    if not local_enabled():
+        raise UnknownNodeError(LOCAL_NODE)
     if _local_docker is None:
         import docker_client
         if docker_client.docker is not None:
@@ -181,11 +199,8 @@ def client(node: str = LOCAL_NODE) -> aiodocker.Docker:
 
 
 def clients() -> dict[str, aiodocker.Docker]:
-    """Client per node, local first, all nodes included."""
-    result = {LOCAL_NODE: local_docker()}
-    for name in _load_nodes():
-        result[name] = client(name)
-    return result
+    """Client per node, local first (if enabled), all nodes included."""
+    return {name: client(name) for name in names()}
 
 
 async def close_all() -> None:
