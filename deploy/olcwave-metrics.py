@@ -36,6 +36,8 @@ def collect(snapshot, nodes, api_exec):
     text += metric('olcwave_collection_success', 1)
     text += metric('olcwave_collection_timestamp_seconds', data['timestamp'])
     text += metric('olcwave_api_up', data['api'])
+    if data.get('remnawave') is not None:
+        text += metric('olcwave_remnawave_up', data['remnawave'])
     for node in data['nodes']:
         text += metric('olcwave_node_up', node['ok'], node=node['node'])
         if node['ok']:
@@ -43,6 +45,16 @@ def collect(snapshot, nodes, api_exec):
     if data.get('nodes_error'):
         for node in nodes:
             text += metric('olcwave_node_up', 0, node=node)
+    elif data['api']:
+        states = {}
+        for container in data.get('containers', []):
+            key = (container['node'], container['status'])
+            states[key] = states.get(key, 0) + 1
+        for node in nodes:
+            for state in ('running', 'restarting', 'exited', 'created', 'paused', 'dead'):
+                text += metric('olcwave_node_containers_state', states.pop((node, state), 0), node=node, state=state)
+        for (node, state), count in states.items():
+            text += metric('olcwave_node_containers_state', count, node=node, state=state)
     if not data.get('users_error') and data['api']:
         text += metric('olcwave_users', len(data['users']))
         for user in data['users']:
@@ -51,6 +63,8 @@ def collect(snapshot, nodes, api_exec):
     for user in data['subscriptions']:
         text += metric('olcwave_subscription_up', user['up'], user=user['user'])
         text += metric('olcwave_subscription_profiles', user['profiles'], user=user['user'])
+        if 'expected' in user:
+            text += metric('olcwave_subscription_expected_profiles', user['expected'], user=user['user'])
     return text
 
 
