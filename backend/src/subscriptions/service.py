@@ -1,7 +1,9 @@
 import asyncio
 import logging
+import json
 import secrets
 from typing import Any
+from urllib.parse import urlsplit, urlunsplit
 
 import emoji
 import yaml
@@ -99,6 +101,14 @@ def bytes_to_notation(num: float):
 
 class Subscriptions:
     @staticmethod
+    def profiles_for_user(profiles, short_uuid):
+        restrictions = json.loads(settings.OLCWAVE_PROFILE_USERS_JSON)
+        return {
+            profile.tag: profile for profile in profiles
+            if profile.tag not in restrictions or short_uuid in restrictions[profile.tag]
+        }
+
+    @staticmethod
     def remove_last_emoji(s: str) -> tuple[str, str]:
         matches = list(emoji.emoji_list(s))
         if not matches:
@@ -138,17 +148,11 @@ class Subscriptions:
             config["auth"].pop("token", None)
 
         if config["auth"]["provider"] == "jitsi":
-            room_url = config["room"]["id"].split("/")
-
-            if len(room_url) == 3:
-                room_url.append(
-                    str(secrets.token_hex(16))
-                )
-
-            elif len(room_url) == 4 and not room_url[3]:
-                room_url[3] = str(secrets.token_hex(16))
-
-            config["room"]["id"] = "/".join(room_url)
+            room = config['room']['id']
+            origin = urlsplit(room if '://' in room else f'https://{room}')
+            config['room']['id'] = urlunsplit((
+                origin.scheme, origin.netloc, f'/{secrets.token_hex(16)}', '', '',
+            ))
         return yaml.dump(config)
 
     @staticmethod
@@ -327,10 +331,7 @@ class Subscriptions:
 
         profiles_list = await Profiles.get_all()
 
-        profiles = {
-            profile.tag: profile
-            for profile in profiles_list
-        }
+        profiles = Subscriptions.profiles_for_user(profiles_list, short_uuid)
 
         missing = profiles.keys() - configs.keys()
 
@@ -484,9 +485,9 @@ class Subscriptions:
 
         profiles_list = await Profiles.get_all()
         profiles = {
-            profile.tag: profile
-            for profile in profiles_list
-            if profile.tag in configs
+            tag: profile for tag, profile in
+            Subscriptions.profiles_for_user(profiles_list, short_uuid).items()
+            if tag in configs
         }
 
         return configs, profiles

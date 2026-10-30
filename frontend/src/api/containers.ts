@@ -1,10 +1,7 @@
 import api from './client'
-import type { Container, ContainerLogs, ContainerConfig, ContainerStats, ContainersList } from '../types'
+import type { ContainerLogs, ContainerConfig, ContainerStats, ContainersList } from '../types'
 
 export const containersApi = {
-  getAll: () =>
-    api.get<Container[]>('/containers/all'),
-
   getAllStatus: () =>
     api.get<ContainersList>('/containers/all_status'),
 

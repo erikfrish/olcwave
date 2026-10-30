@@ -1,0 +1,21 @@
+[Unit]
+Description=OLCWave private API and subscription metrics
+After=docker.service network-online.target
+Requires=docker.service
+[Service]
+Type=simple
+ExecStart=/usr/bin/python3 /opt/olcwave/deploy/olcwave-metrics.py
+Restart=on-failure
+RestartSec=5
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+MemoryMax=128M
+TasksMax=32
+[Install]
+WantedBy=multi-user.target

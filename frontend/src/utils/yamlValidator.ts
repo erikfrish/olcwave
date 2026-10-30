@@ -1,7 +1,7 @@
 import { load } from 'js-yaml'
 import type { ValidationError, ValidationWarning, YamlValidationResult } from '../types'
 
-const ALLOWED_PROVIDERS = ['jitsi', 'telemost', 'wbstream', 'none']
+const ALLOWED_PROVIDERS = ['jitsi', 'telemost', 'wbstream', 'salutejazz', 'vkcalls', 'mtslink', 'none']
 const ALLOWED_TRANSPORTS = ['datachannel', 'vp8channel', 'seichannel', 'videochannel']
 const DURATION_RE = /^\d+[smhd]$/
 const DELAY_RE = /^\d+ms$/

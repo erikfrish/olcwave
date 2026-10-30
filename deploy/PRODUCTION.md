@@ -29,11 +29,79 @@ Node authorized_keys forces ONLY
 forbids forwarding. This grants full access to that unprivileged user's isolated
 Docker daemon, NOT to root daemon or host root shell. Controller API sees the
 root-only relay directory, not remote TCP Docker ports.
+The relay template sets `RuntimeDirectoryPreserve=yes`: all instances share
+this bind-mounted directory, so stopping one must not unlink other instances'
+sockets or replace the directory inode beneath the API mount. Each instance
+removes only its own stale socket in ExecStartPre. Recovery: install the current
+template, daemon-reload and restart affected relay units; do not recreate VPN
+engines. Verified restarting vm3 leaves vm1/vm2 sockets intact and both personal
+subscriptions return six profiles. Rollback must not remove this preservation
+setting while relay instances share the directory.
+
+`olcwave-metrics.service` runs the private exporter at `10.69.1.100:9465`.
+Install `olcwave-metrics.py` and `olcwave-metrics-snapshot.py` beside this runbook;
+install the unit in `/etc/systemd/system`, daemon-reload and enable/start it.
+It checks API auth, all node states, relay sockets, monthly usage/limits and
+public subscription issuance for erikfrish/OLEG using supported API calls.
+No direct production DB queries; credentials stay inside the API environment.
+Collection is serialized, command timeout 50s, delay between samples 30s;
+HTTP scrapes read only the cached snapshot. Failed snapshots omit user data
+and export failure/freshness signals rather than inventing zero usage.
+Grafana/VM rules live in talos-home's monitoring chart; dashboard UID
+`olcwave-health`. New alerts are evaluated but blackholed pending notification
+approval. Disable only this service for monitoring rollback; VPN untouched.
+
+
 
 `OLCWAVE_NODES_JSON` maps profile tag exactly to node. Invalid config or unknown
 tag fails, never falls back to the controller. Each node's image is preloaded
 from the pinned engine build. API restart preserves valid keys and container
 IDs. Node status is visible in OLCWave GUI; unreachable nodes report errors.
+
+Panel scope: in Remnawave mode, Users synchronizes identities from Remnawave;
+local user creation is hidden. There is no self-registration or provider-account
+registration flow. Profiles has credential-entry help for Telemost Session_id
+and WB access-token autogeneration, not an account login/registration wizard.
+Node health appears as badges in Containers; node creation, SSH relay setup and
+profile-to-node mapping remain operator-owned configuration, not GUI controls.
+Trial carriers SaluteJazz, VK Calls and Telemost are now managed profiles
+`vm3jazz`, `vm3vk`, `vm3telemost`, mapped exclusively to vm3. The private
+`OLCWAVE_PROFILE_USERS_JSON` maps those tags to erikfrish/OLEG short UUIDs;
+unspecified tags remain available to all eligible users. Both subscriptions
+contain six profiles; other users receive only the three Jitsi profiles.
+Each user has a separate labeled container/key in the shared trial room, so
+traffic, revocation and quota enforcement use the normal OLCWave lifecycle.
+Former standalone trial containers are retired; their keys are obsolete.
+Manual phone trial entries were removed after subscribed SaluteJazz/VK passed
+HTTPS. Telemost retains its experimental status: prior mobile proof failed.
+Frontend validation accepts the engine's SaluteJazz/VK/MTS provider names.
+Removing a trial from issuance requires removing its profile via the API,
+which also removes its managed containers. Dashboard "Online" means the API
+responds, not tunnel health.
+
+Dashboard cache repair: Dashboard and Containers now both cache the
+`/containers/all_status` envelope under `containers-all`; Dashboard reads its
+`containers` field. Previously the two pages cached an array and an envelope
+under the same key, causing `filter is not a function` after navigation.
+The flat-list frontend accessor was removed. Verified the production build and
+actual Containers → Dashboard navigation with no page errors; API, keys and
+transport containers were unchanged. Frontend rollback image on VM100:
+`localhost/olcwave-frontend:before-dashboard-cache-fix`.
+
+Jitsi room isolation: every newly provisioned user/profile config generates a
+fresh random room on the template's Jitsi origin, whether the template is a
+bare host, host/room or full URL. Template room paths are not reused. Ordinary
+subscription refresh reuses existing config; reprovisioning generates again.
+The six existing erikfrish/OLEG configs were recreated: six distinct rooms and
+keys, all six verified with actual HTTPS. Clients must refresh their existing
+subscriptions; URLs and quotas were unchanged. Tests cover two independent
+users receiving different rooms for all three template formats (failed before,
+passed after). API rollback image: `localhost/olcwave-api:before-room-isolation`;
+do not restore colliding room configs. This random-room policy applies to Jitsi,
+not the shared non-Jitsi trial rooms. Private proof:
+`talos-home/.ignore/olcwave-production/room-cutover-*/`.
+
+
 
 ## erikfrish rollout policy
 

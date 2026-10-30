@@ -20,6 +20,8 @@ class Settings(BaseSettings):
     # Empty string = single-node local mode (unchanged behavior).
     # Set by deploy env; never committed.
     OLCWAVE_NODES_JSON: str = ""
+    # Optional profile tag -> allowed user short UUIDs; unspecified tags are public.
+    OLCWAVE_PROFILE_USERS_JSON: str = "{}"
     DB_HOST: str
     DB_PORT: int
     POSTGRES_USER: str

@@ -37,13 +37,13 @@ export default function Dashboard() {
   })
   const containersQuery = useQuery({
     queryKey: ['containers-all'],
-    queryFn: () => containersApi.getAll().then((r) => r.data),
+    queryFn: () => containersApi.getAllStatus().then((r) => r.data),
     refetchInterval: refreshMs || false,
   })
 
   const users = usersQuery.data || []
   const profiles = profilesQuery.data || []
-  const containers = containersQuery.data || []
+  const containers = containersQuery.data?.containers || []
   const loading = usersQuery.isLoading || profilesQuery.isLoading
 
   const activeUsers = users.filter((u) => new Date(u.expires_at) > new Date()).length
