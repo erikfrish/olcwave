@@ -32,7 +32,7 @@
 - CronJob `olcwave-monthly-quota` replaces the systemd timer; its month journal is
   on PVC `olcwave-quota-state`.
 - CronJob `olcwave-backup` (daily 02:47 MSK) writes a verified `pg_dump -Fc`
-  plus a copy of the quota journal to PVC `olcwave-backups` (`nfs-backups`),
+  plus a copy of the quota journal to PVC `olcwave-backups` (`nfs-tank`),
   keeping 30 days.
 - Remnawave: `RW_API_URL=http://remnawave.remnawave.svc.cluster.local:3000`.
 - vm2 is reached through the cluster `vpn-gateway` SOCKS proxy.
