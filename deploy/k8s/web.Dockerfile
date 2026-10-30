@@ -28,6 +28,10 @@ FROM docker.io/library/caddy:2-alpine@sha256:173b26306d711395accaeba8b67afcaad2a
 COPY deploy/k8s/Caddyfile /etc/caddy/Caddyfile
 COPY --from=frontend /build/dist /srv/frontend/dist
 COPY --from=subscriptionpage /build/dist /srv/subscriptionPage/dist
+# Upstream sets cap_net_bind_service on the binary; exec of a file-capability
+# binary fails under no_new_privs with all capabilities dropped. Ports are
+# unprivileged, so copy the binary without the security.capability xattr.
+RUN cp /usr/bin/caddy /tmp/caddy && mv /tmp/caddy /usr/bin/caddy && chmod 0755 /usr/bin/caddy
 # Runs as any non-root uid; Caddy state goes to a writable emptyDir.
 ENV XDG_CONFIG_HOME=/tmp/caddy XDG_DATA_HOME=/tmp/caddy
 USER 10001:10001
