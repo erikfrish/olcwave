@@ -32,8 +32,12 @@ def main():
         if not pending:
             print('No monthly resets due')
             return
-        env = dict(line.split('=', 1) for line in Path(config['env_file']).read_text().splitlines() if '=' in line and not line.startswith('#'))
-        opener = urllib.request.build_opener(urllib.request.ProxyHandler({}), urllib.request.HTTPSHandler(context=ssl.create_default_context(cafile=config['ca_file'])))
+        # env_file absent = admin credentials come from the process env (Kubernetes Secret).
+        if config.get('env_file'):
+            env = dict(line.split('=', 1) for line in Path(config['env_file']).read_text().splitlines() if '=' in line and not line.startswith('#'))
+        else:
+            env = os.environ
+        opener = urllib.request.build_opener(urllib.request.ProxyHandler({}), urllib.request.HTTPSHandler(context=ssl.create_default_context(cafile=config.get('ca_file'))))
         def call(path, body, token=None):
             headers = {'Content-Type': 'application/json'}
             if token:

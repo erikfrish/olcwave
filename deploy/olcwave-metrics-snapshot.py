@@ -8,10 +8,10 @@ import urllib.request
 BASE = 'http://127.0.0.1:8000'
 
 
-def request(path, token=None, body=None):
+def request(path, token=None, body=None, timeout=8):
     req = urllib.request.Request(BASE + path, data=json.dumps(body).encode() if body is not None else None,
                                  headers={'Content-Type': 'application/json', **({'Authorization': 'Bearer ' + token} if token else {})})
-    with urllib.request.urlopen(req, timeout=8) as response:
+    with urllib.request.urlopen(req, timeout=timeout) as response:
         return json.load(response)
 
 
@@ -24,7 +24,9 @@ def main():
         print(json.dumps(result))
         return
     try:
-        result['nodes'] = request('/containers/all_status', token)['nodes']
+        # A dead node costs ~2x ssh ConnectTimeout before the API answers;
+        # a short timeout here would report every node as down.
+        result['nodes'] = request('/containers/all_status', token, timeout=30)['nodes']
     except Exception:
         result['nodes_error'] = True
     try:

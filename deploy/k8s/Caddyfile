@@ -1,0 +1,50 @@
+# Kubernetes web tier: same routing as deploy/caddy/Caddyfile, but plain HTTP
+# behind the cluster ingress (TLS terminates at Traefik). The API is the
+# in-namespace Service {$OLCWAVE_API_UPSTREAM} (default olcwave-api:8000).
+{
+	auto_https off
+	admin off
+	persist_config off
+}
+
+:8080 {
+	handle_path /api/* {
+		reverse_proxy {$OLCWAVE_API_UPSTREAM:olcwave-api:8000}
+	}
+
+	handle /sub/* {
+		reverse_proxy {$OLCWAVE_API_UPSTREAM:olcwave-api:8000}
+	}
+
+	handle /healthz {
+		respond "ok" 200
+	}
+
+	handle {
+		root * /srv/frontend/dist
+		try_files {path} /index.html
+		file_server
+	}
+}
+
+:8081 {
+	@check path_regexp check ^/(?P<id>[^/]+)/check$
+
+	handle @check {
+		rewrite * /sub/{re.id}/check
+		reverse_proxy {$OLCWAVE_API_UPSTREAM:olcwave-api:8000}
+	}
+
+	@browser header_regexp browser User-Agent (?i)^Mozilla/
+
+	handle @browser {
+		root * /srv/subscriptionPage/dist
+		try_files {path} /index.html
+		file_server
+	}
+
+	handle {
+		rewrite * /sub{uri}
+		reverse_proxy {$OLCWAVE_API_UPSTREAM:olcwave-api:8000}
+	}
+}

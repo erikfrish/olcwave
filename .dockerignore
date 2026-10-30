@@ -1,0 +1,13 @@
+# Root build context is used only by deploy/k8s/*.Dockerfile; keep it to the
+# sources those images copy.
+**/node_modules
+**/dist
+**/.venv
+**/__pycache__
+**/.pytest_cache
+.git
+.rundata
+backend
+deploy/backend.env
+deploy/tls
+deploy/*.pem

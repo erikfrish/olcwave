@@ -4,6 +4,7 @@ import argparse
 import json
 from pathlib import Path
 import socket
+import shlex
 import subprocess
 import threading
 import time
@@ -15,9 +16,9 @@ def metric(name, value, **labels):
     return f'{name}{suffix} {float(value)}\n'
 
 
-def collect(snapshot):
+def collect(snapshot, nodes, api_exec):
     text = ''
-    for node in ('vm1', 'vm2', 'vm3'):
+    for node in (n for n in nodes if n != 'local'):
         try:
             with socket.socket(socket.AF_UNIX) as sock:
                 sock.settimeout(2)
@@ -27,7 +28,7 @@ def collect(snapshot):
             up = 0
         text += metric('olcwave_relay_socket_up', up, node=node)
     try:
-        proc = subprocess.run(['docker', 'exec', '-i', 'olcwave-api', 'python', '-'], input=snapshot,
+        proc = subprocess.run(api_exec, input=snapshot,
                               capture_output=True, text=True, timeout=50, check=True)
         data = json.loads(proc.stdout)
     except Exception:
@@ -40,7 +41,7 @@ def collect(snapshot):
         if node['ok']:
             text += metric('olcwave_node_containers', node['containers'], node=node['node'])
     if data.get('nodes_error'):
-        for node in ('local', 'vm1', 'vm2', 'vm3'):
+        for node in nodes:
             text += metric('olcwave_node_up', 0, node=node)
     if not data.get('users_error') and data['api']:
         text += metric('olcwave_users', len(data['users']))
@@ -57,17 +58,23 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--listen', default='10.69.1.100:9465')
     parser.add_argument('--once', action='store_true')
+    parser.add_argument('--nodes', default='local,vm1,vm2,vm3',
+                        help="comma-separated panel nodes; every node except 'local' has a relay socket")
+    parser.add_argument('--api-exec', default='docker exec -i olcwave-api python -',
+                        help='command that runs the snapshot script (stdin) next to the API')
     args = parser.parse_args()
+    nodes = tuple(n for n in args.nodes.split(',') if n)
+    api_exec = shlex.split(args.api_exec)
     snapshot = Path(__file__).with_name('olcwave-metrics-snapshot.py').read_text()
     if args.once:
-        print(collect(snapshot), end='')
+        print(collect(snapshot, nodes, api_exec), end='')
         return
     current = [metric('olcwave_collection_success', 0)]
     lock = threading.Lock()
 
     def loop():
         while True:
-            text = collect(snapshot)
+            text = collect(snapshot, nodes, api_exec)
             with lock:
                 current[0] = text
             time.sleep(30)
