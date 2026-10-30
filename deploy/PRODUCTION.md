@@ -2,17 +2,37 @@
 
 ## Live deployment
 
-- Controller: dedicated VM100 `olcwave`, `10.69.1.100`, Proxmox `pve`, onboot1.
+- Controller: Kubernetes namespace `olcwave` in talos-home
+  (`apps/olcwave/*.yaml`, aggregate apps chart; operations in
+  `talos-home/apps/README.md#olcwave`). Former VM100 `olcwave`
+  (`10.69.1.100`) was retired at the 2026-10-30 cutover: units disabled, data
+  retained but not authoritative.
 - Admin panel: `https://olcwave.home.arpa` (LAN/private CA), or
   `https://olcwave.nazavo.de` (publicly trusted TLS, LAN allow-list).
 - Client subscriptions: `https://olcsub.nazavo.de/<short_uuid>` (public HTTPS).
   This origin exposes only subscription bundles/check and user SPA, not admin API.
-- Kubernetes edge ownership: `talos-home/apps/olcwave/ingressroute.yaml`, included
-  by aggregate apps Helm allow-list. TLS origin is verified with Secret
-  `ingress/olcwave-origin-ca`; no insecureSkipVerify.
+- Kubernetes edge ownership: `talos-home/apps/olcwave/ingressroute.yaml`.
+  Traefik reaches `olcwave-web` (`8080` panel, `8081` subscriptions) over plain
+  in-cluster HTTP; Secret `ingress/olcwave-origin-ca` is no longer used.
 - LAN Unbound overrides map both panel names to10.69.1.90. VPN clients that
   override system DNS may still resolve the public address and get403: use the
   home.arpa alias, not a broader WAN admin allow-list.
+
+## Kubernetes layout
+
+- Images from this fork: `deploy/api/Dockerfile` (api), `deploy/k8s/web.Dockerfile`
+  (Caddy with both SPAs, `deploy/k8s/Caddyfile`) and `deploy/k8s/ops.Dockerfile`
+  (relay, exporter, quota job); pinned by digest in
+  `harbor.home.arpa/talos/olcwave-{api,web,ops}:<version>-k8s-<commit>`.
+- `olcwave-api`: one replica, `Recreate`; `OLCWAVE_LOCAL_NODE=false`, so the
+  API never touches a local Docker socket or XrayCore and every profile tag must
+  map to a remote node in `OLCWAVE_NODES_JSON`. Sidecars `relay-vm1/2/3` replace
+  `olcwave-node-relay@.service`; `metrics` replaces `olcwave-metrics.service`.
+- `olcwave-postgres` (PVC `olcwave-postgres-data`) replaces the Compose database.
+- CronJob `olcwave-monthly-quota` replaces the systemd timer; its month journal is
+  on PVC `olcwave-quota-state`.
+- Remnawave: `RW_API_URL=http://remnawave.remnawave.svc.cluster.local:3000`.
+- vm2 is reached through the cluster `vpn-gateway` SOCKS proxy.
 
 ## Access boundaries
 
@@ -21,26 +41,22 @@ Transport nodes vm1/vm2/vm3 each run a dedicated rootless daemon under
 `/run/olcwave-node-docker/docker.sock`. Existing root Docker and bare
 `olcrtc.service` / `olcrtc-oleg.service` are not managed by OLCWave.
 
-Controller-side root-only relay sockets `/run/olcwave-nodes/{vm1,vm2,vm3}.sock`
-are provided by `olcwave-node-relay@.service`. The VM has a separate SSH key.
+Controller-side relay sockets `/run/olcwave-nodes/{vm1,vm2,vm3}.sock` are
+provided by the `relay-*` sidecars (socat + ssh, uid 10001) on a shared
+`emptyDir`. The controller has a separate SSH key (Secret `olcwave-node-ssh`).
 Node authorized_keys forces ONLY
 `docker -H unix:///run/olcwave-node-docker/docker.sock system dial-stdio`;
 `restrict` disables shells/PTY/agent/X11/TCP forwarding. SSH Match policy also
 forbids forwarding. This grants full access to that unprivileged user's isolated
 Docker daemon, NOT to root daemon or host root shell. Controller API sees the
 root-only relay directory, not remote TCP Docker ports.
-The relay template sets `RuntimeDirectoryPreserve=yes`: all instances share
-this bind-mounted directory, so stopping one must not unlink other instances'
-sockets or replace the directory inode beneath the API mount. Each instance
-removes only its own stale socket in ExecStartPre. Recovery: install the current
-template, daemon-reload and restart affected relay units; do not recreate VPN
-engines. Verified restarting vm3 leaves vm1/vm2 sockets intact and both personal
-subscriptions return six profiles. Rollback must not remove this preservation
-setting while relay instances share the directory.
+Each relay owns only its own socket, so restarting one sidecar leaves the other
+sockets intact. Recovery: restart the API pod; do not recreate VPN engines.
+The VM100 `olcwave-node-relay@.service` template with
+`RuntimeDirectoryPreserve=yes` is retained for VM rollback only.
 
-`olcwave-metrics.service` runs the private exporter at `10.69.1.100:9465`.
-Install `olcwave-metrics.py` and `olcwave-metrics-snapshot.py` beside this runbook;
-install the unit in `/etc/systemd/system`, daemon-reload and enable/start it.
+The `metrics` sidecar runs the private exporter at
+`olcwave-metrics.olcwave.svc.cluster.local:9465`.
 It checks API auth, all node states, relay sockets, monthly usage/limits and
 public subscription issuance for erikfrish/OLEG using supported API calls.
 No direct production DB queries; credentials stay inside the API environment.
@@ -49,7 +65,7 @@ HTTP scrapes read only the cached snapshot. Failed snapshots omit user data
 and export failure/freshness signals rather than inventing zero usage.
 Grafana/VM rules live in talos-home's monitoring chart; dashboard UID
 `olcwave-health`. New alerts are evaluated but blackholed pending notification
-approval. Disable only this service for monitoring rollback; VPN untouched.
+approval. For monitoring rollback remove only the `metrics` sidecar; VPN untouched.
 
 
 
@@ -148,23 +164,26 @@ Reset while a node is unreachable can conservatively re-count its traffic.
 
 ## Operate and rollback
 
-Inside controller VM only:
+Kubernetes is authoritative: change images, replicas and configuration in
+talos-home Git. The apps HelmRelease corrects drift, so a manual
+`kubectl scale` is reverted. To hold the API down, commit `replicas: 0` or
+suspend the HelmRelease first. Never run the API against an unreachable
+Remnawave: past the 120s grace the reconciler removes unverifiable owners'
+containers.
 
-```sh
-cd /opt/olcwave
-export HOST_IP=10.69.1.100
-docker compose -f deploy/docker-compose.vm.yaml -f deploy/docker-compose.production.yaml up -d
-systemctl status olcwave-controller olcwave-node-relay@vm1 olcwave-node-relay@vm2 olcwave-node-relay@vm3
-```
-
-`olcwave-controller.service` is enabled; node relay units start independently and
-retry. `install-rootless-node.sh` installs only the unprivileged node daemon.
+`install-rootless-node.sh` installs only the unprivileged node daemon.
 Image alias `olcrtc` is pinned by the deployed image archive checksum in custody.
-Never point node relay to `/var/run/docker.sock` of a VPS root daemon.
+Never point a node relay at `/var/run/docker.sock` of a VPS root daemon.
+
+VM100 rollback (before VM deletion only): stop the cluster API, dump the
+cluster database and restore it into the VM, re-enable `olcwave-controller`,
+`olcwave-metrics`, `olcwave-node-docker`, the relay units and the quota timer,
+then point the IngressRoutes back at the VM. The VM database is a 2026-10-30
+snapshot and must not be used as is.
 
 Rollback only this integration: disable the limited Ghostlane identity via
-Remnawave, observe its owned engines gone, stop controller/relay units and
-remove the OLCWave ingress through GitOps. Legacy bare Ghostlane services
+Remnawave, observe its owned engines gone, scale `olcwave-api` to zero in Git and
+remove the OLCWave IngressRoutes through GitOps. Legacy bare Ghostlane services
 are permanently retired; preserve existing Remnawave VLESS/AWG instead.
 Do not run broad Docker prune. Keep DB/keys/SSH state backups before changes;
 production DB access or restore requires explicit separate permission.
@@ -183,9 +202,9 @@ Separate Remnawave `oleg-ghostlane` receives all three managed Ghostlane nodes.
 Access has no contractual expiry (panel uses2099 sentinel). Quota500GB decimal
 (500000000000 bytes) resets once per calendar month, Europe/Moscow, first day
 00:00. `monthly-quota-reset.py` calls the supported OLCWave reset API and keeps
-a root-only month journal. Timer runs at the boundary, at boot and hourly for
-missed-reset recovery; repeated runs in the same month are no-ops. Private config
-`/etc/olcwave/monthly-quota.json` selects only this user. Initial reset and repeated
+a month journal (`olcwave-quota-state` PVC). The CronJob runs hourly; repeated
+runs in the same month are no-ops. Private Secret `olcwave-monthly-quota`
+(`config.json`) selects the users. Initial reset and repeated
 no-op were exercised; next calendar boundary is2026-11-01 00:00 MSK.
 Old Oleg static links and cached olcRTC keys were revoked on2026-10-22;
 only the managed OLCWave access remains, so that old quota bypass is closed.
