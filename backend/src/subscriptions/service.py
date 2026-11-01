@@ -14,6 +14,7 @@ from config import settings
 from settings.service import SettingsService
 from users.schemas import TrafficInfoSchema, UserSchema
 from profiles.roomGenerator import RoomChecker, RoomGenerator
+from olcrtc import nodes
 from profiles.service import Containers
 from profiles.service import Profiles
 from users.service import Users
@@ -26,6 +27,10 @@ from rw.reconcile import ReconcileManager, SubscriptionGuard
 # are called only while the lock is held, so no held-set cleverness is needed
 # and an inner release can never unlock an outer critical section.
 _profile_locks: dict[str, asyncio.Lock] = {}
+
+
+class NodeUnavailableError(RuntimeError):
+    """A node holding the user's profiles could not be inspected."""
 
 
 def _lock_for(short_uuid: str) -> asyncio.Lock:
@@ -188,19 +193,23 @@ class Subscriptions:
     async def get_launched_tags(short_uuid: str):
         """Tags of the user's panel containers on EVERY node.
 
-        Returns (tag, handle) pairs: the handle carries the source node, so
-        config reads and removals below hit the SAME daemon - remote
-        containers are served/revoked exactly like local ones.
+        Returns ((tag, handle) pairs, unreachable node names): the handle
+        carries the source node, so config reads and removals below hit the
+        SAME daemon - remote containers are served/revoked exactly like local
+        ones. A node in the unreachable set contributed nothing, so its tags
+        being absent says nothing about whether their containers exist.
         """
         launched = []
-        handles, _node_errors = await Containers.panel_containers(short_uuid)
+        handles, node_errors = await Containers.panel_containers(short_uuid)
         for handle in handles:
             info = await handle.show()
             parsed = Containers.parse_panel_labels(info)
             if parsed is not None and parsed[1] == short_uuid:
                 launched.append((parsed[0], handle))
 
-        return launched
+        # panel_containers reports every failure as "<node>: <error>".
+        unreachable = {err.split(":", 1)[0] for err in node_errors}
+        return launched, unreachable
 
     @staticmethod
     def prepare_sub_text(
@@ -293,7 +302,25 @@ class Subscriptions:
 
         # (tag, handle) pairs across ALL nodes; handle routes every follow-up
         # call to the daemon the container actually lives on.
-        running = await Subscriptions.get_launched_tags(short_uuid)
+        running, unreachable = await Subscriptions.get_launched_tags(short_uuid)
+
+        profiles_list = await Profiles.get_all()
+
+        profiles = Subscriptions.profiles_for_user(profiles_list, short_uuid)
+
+        # An unreachable node hides its containers: their tags would look
+        # missing and be recreated with fresh rooms/keys, silently breaking
+        # every client holding the current config. Refuse before mutating
+        # anything; the client keeps its last subscription and retries.
+        blocked = sorted(
+            tag for tag in profiles
+            if unreachable and nodes.node_for_tag(tag) in unreachable
+        )
+        if blocked:
+            raise NodeUnavailableError(
+                f"nodes {sorted(unreachable)} unreachable; "
+                f"not provisioning {blocked}"
+            )
 
         async def load_config(handle):
             config = await Containers.get_config_of(handle)
@@ -328,10 +355,6 @@ class Subscriptions:
             *(check_profile(tag, cfg)
               for tag, cfg in configs.items())
         )
-
-        profiles_list = await Profiles.get_all()
-
-        profiles = Subscriptions.profiles_for_user(profiles_list, short_uuid)
 
         missing = profiles.keys() - configs.keys()
 
@@ -411,6 +434,11 @@ class Subscriptions:
                                 short_uuid
                             )
                         )
+                except NodeUnavailableError as exc:
+                    logging.getLogger(__name__).warning(
+                        "subscription deferred for %s: %s", short_uuid, exc
+                    )
+                    return Response(status_code=503)
                 except Exception:
                     logging.getLogger(__name__).exception(
                         "subscription build failed for %s", short_uuid
@@ -430,6 +458,11 @@ class Subscriptions:
 
             try:
                 configs, profiles = await _ensure_locked(short_uuid)
+            except NodeUnavailableError as exc:
+                logging.getLogger(__name__).warning(
+                    "subscription deferred for %s: %s", short_uuid, exc
+                )
+                return Response(status_code=503)
             except Exception:
                 logging.getLogger(__name__).exception(
                     "subscription build failed for %s", short_uuid
@@ -472,7 +505,7 @@ class Subscriptions:
         """
         # (tag, handle) pairs across ALL nodes; configs are read on each
         # handle's own daemon. Read-only: nothing is created or replaced.
-        running = await Subscriptions.get_launched_tags(short_uuid)
+        running, _unreachable = await Subscriptions.get_launched_tags(short_uuid)
 
         async def load_config(handle):
             config = await Containers.get_config_of(handle)

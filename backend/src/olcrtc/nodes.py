@@ -33,6 +33,7 @@ import json
 import logging
 
 import aiodocker
+import aiohttp
 
 from config import settings
 
@@ -167,6 +168,30 @@ def resolve_node(node: str | None = None, config_tag: str | None = None) -> str:
     return LOCAL_NODE
 
 
+# Every remote node socket is an SSH relay: each NEW connection is a fresh SSH
+# handshake (`ssh ... docker system dial-stdio`). sshd throttles concurrent
+# unauthenticated handshakes (MaxStartups, default 10:30:100), so an unbounded
+# pool (aiohttp default 100) gets bursts of parallel calls reset during key
+# exchange. A small pool of kept-alive connections reuses established SSH
+# sessions and keeps the handshake rate far below that limit.
+REMOTE_POOL_LIMIT = 4
+REMOTE_KEEPALIVE_SECONDS = 120.0
+UNIX_PREFIX = "unix://"
+
+
+def _remote_client(docker_url: str) -> aiodocker.Docker:
+    if not docker_url.startswith(UNIX_PREFIX):
+        return aiodocker.Docker(url=docker_url)
+    connector = aiohttp.UnixConnector(
+        docker_url[len(UNIX_PREFIX):],
+        limit=REMOTE_POOL_LIMIT,
+        keepalive_timeout=REMOTE_KEEPALIVE_SECONDS,
+    )
+    # With a caller-supplied connector aiodocker uses `url` verbatim for
+    # request URLs, so pass the dummy host it would use itself.
+    return aiodocker.Docker(url=UNIX_PREFIX + "localhost", connector=connector)
+
+
 def local_docker() -> aiodocker.Docker:
     """The LOCAL daemon client (the instance docker_client manages)."""
     global _local_docker
@@ -194,7 +219,7 @@ def client(node: str = LOCAL_NODE) -> aiodocker.Docker:
         raise UnknownNodeError(node)
     if node not in _clients:
         logger.info("connecting to node daemon %s at %s", node, spec["docker_url"])
-        _clients[node] = aiodocker.Docker(url=spec["docker_url"])
+        _clients[node] = _remote_client(spec["docker_url"])
     return _clients[node]
 
 
@@ -209,6 +234,9 @@ async def close_all() -> None:
     for name, cl in _clients.items():
         try:
             await cl.close()
+            # _remote_client passes its own connector: aiodocker does not
+            # close a caller-owned one (closing twice is a no-op).
+            await cl.connector.close()
         except Exception:  # noqa: BLE001 - shutdown must not raise
             logger.exception("failed to close node client %s", name)
     _clients.clear()

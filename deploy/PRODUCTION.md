@@ -28,6 +28,10 @@
   API never touches a local Docker socket or XrayCore and every profile tag must
   map to a remote node in `OLCWAVE_NODES_JSON`. Sidecars `relay-vm1/2/3` replace
   `olcwave-node-relay@.service`; `metrics` replaces `olcwave-metrics.service`.
+  Each relay connection is a fresh SSH handshake, so the API keeps at most 4
+  kept-alive connections per node (sshd `MaxStartups` resets bursts). A
+  subscription whose node cannot be listed returns 503 and creates nothing: the
+  client keeps its current keys instead of getting re-provisioned ones.
 - `olcwave-postgres` (PVC `olcwave-postgres-data`) replaces the Compose database.
 - CronJob `olcwave-monthly-quota` replaces the systemd timer; its month journal is
   on PVC `olcwave-quota-state`.

@@ -48,7 +48,7 @@ def remote_only(monkeypatch):
     nodes.reset_cache()
 
 
-def test_registry_lists_only_remote_nodes(remote_only):
+async def test_registry_lists_only_remote_nodes(remote_only):
     assert nodes.names() == ["vm1", "vm3"]
     assert set(nodes.clients()) == {"vm1", "vm3"}
 
