@@ -25,7 +25,6 @@ from rw.reconcile import ReconcileManager, SubscriptionGuard
 # Every entry into a per-user critical section takes it exactly once; helpers
 # that must run under the lock (revocation removal) are provided unlocked and
 # are called only while the lock is held, so no held-set cleverness is needed
-# and an inner release can never unlock an outer critical section.
 _profile_locks: dict[str, asyncio.Lock] = {}
 
 
@@ -103,6 +102,50 @@ def bytes_to_notation(num: float):
 
     return f"{int(num)}{notations[ptr]}"
 
+async def _config_from_inspect(handle) -> str | None:
+    """CONFIG env captured at container creation, via inspect only.
+
+    OlcRTC.run writes the issued config into the CONFIG env and
+    OlcRTC.restart already treats that env as the authoritative config, so
+    it is the standard fallback when the in-container file cannot be read
+    (e.g. Docker exec 409 while the container restarts). It carries the
+    SAME key and room the clients already hold - never a fresh credential.
+    """
+    try:
+        info = await handle.show()
+    except Exception:  # noqa: BLE001 - inspect here is best-effort
+        return None
+    for item in info.get("Config", {}).get("Env") or []:
+        if item.startswith("CONFIG="):
+            value = item.split("=", 1)[1]
+            return value if value.strip() else None
+    return None
+
+
+async def _load_config_isolated(tag: str, handle) -> tuple[str, str | None]:
+    """Read one container's config without failing its siblings.
+
+    Returns (tag, config-or-None): a failed exec read falls back to the
+    inspect CONFIG env; only when neither source yields a config does the
+    tag drop out (and it is then never recreated - the container exists).
+    Logs the tag and exception TYPE only - never the error text, which may
+    carry credentials.
+    """
+    log = logging.getLogger(__name__)
+    try:
+        return tag, await Containers.get_config_of(handle)
+    except Exception as exc:  # noqa: BLE001 - per-container isolation
+        config = await _config_from_inspect(handle)
+        if config is not None:
+            log.warning(
+                "config exec failed for %s (%s); serving inspect CONFIG",
+                tag, type(exc).__name__,
+            )
+            return tag, config
+        log.warning(
+            "config unavailable for %s (%s)", tag, type(exc).__name__,
+        )
+        return tag, None
 
 class Subscriptions:
     @staticmethod
@@ -322,58 +365,88 @@ class Subscriptions:
                 f"not provisioning {blocked}"
             )
 
-        async def load_config(handle):
-            config = await Containers.get_config_of(handle)
-            return handle, config
-
+        # Per-container isolation: one container's failed config read (e.g.
+        # exec 409 while it restarts) must not 503 the whole subscription or
+        # make the tag look missing and get recreated with a fresh key/room.
+        # The inspect CONFIG fallback serves the SAME credential the clients
+        # already hold. A tag with no config at all is DROPPED, never
+        # recreated - its container demonstrably exists.
         loaded = await asyncio.gather(
-            *(load_config(handle) for _, handle in running)
+            *(_load_config_isolated(tag, handle) for tag, handle in running)
         )
 
-        configs = {tag: cfg for (tag, _), (_, cfg) in zip(running, loaded)}
+        configs = {tag: cfg for tag, cfg in loaded if cfg is not None}
         handles = {tag: handle for tag, handle in running}
 
+        # Per-profile isolation for the whole ensure step: one profile's
+        # failing room check (upstream outage) or failed container start
+        # must not 503 the subscription when other profiles are fine - and
+        # must never be retried by recreating an existing container with a
+        # fresh key/room.
         async def check_profile(tag, config):
+            try:
+                obj = yaml.safe_load(config)
 
-            obj = yaml.safe_load(config)
+                provider = obj["auth"]["provider"]
 
-            provider = obj["auth"]["provider"]
+                if provider in ("telemost", "wbstream"):
 
-            if provider in ("telemost", "wbstream"):
+                    exists = await RoomChecker.check_room_id(
+                        provider,
+                        obj["room"]["id"],
+                        obj["auth"].get("token", ""),
+                    )
 
-                exists = await RoomChecker.check_room_id(
-                    provider,
-                    obj["room"]["id"],
-                    obj["auth"].get("token", ""),
+                    if not exists:
+                        # Remove on the SAME node the handle was found on.
+                        await Containers.remove_handle(handles[tag])
+                        configs.pop(tag, None)
+                        handles.pop(tag, None)
+            except Exception as exc:  # noqa: BLE001 - per-profile isolation
+                logging.getLogger(__name__).warning(
+                    "room check failed for %s of %s (%s); profile excluded",
+                    tag, short_uuid, type(exc).__name__,
                 )
-
-                if not exists:
-                    # Remove on the SAME node the handle was found on.
-                    await Containers.remove_handle(handles[tag])
+                configs.pop(tag, None)
 
         await asyncio.gather(
             *(check_profile(tag, cfg)
-              for tag, cfg in configs.items())
+              for tag, cfg in list(configs.items()))
         )
 
-        missing = profiles.keys() - configs.keys()
+        # Provision only genuinely absent containers: a tag whose config
+        # could not be read still HAS a container - recreating it would
+        # mint a fresh key/room and break every current client.
+        missing = profiles.keys() - handles.keys()
 
         async def start_profile(tag):
-            config = await Subscriptions.profile_to_config(
-                profiles[tag].profile
-            )
+            try:
+                config = await Subscriptions.profile_to_config(
+                    profiles[tag].profile
+                )
 
-            configs[tag] = config
+                await Containers.run(
+                    config,
+                    tag,
+                    short_uuid,
+                )
 
-            await Containers.run(
-                config,
-                tag,
-                short_uuid,
-            )
+                configs[tag] = config
+            except Exception as exc:  # noqa: BLE001 - per-profile isolation
+                logging.getLogger(__name__).warning(
+                    "provisioning failed for %s of %s (%s); profile excluded",
+                    tag, short_uuid, type(exc).__name__,
+                )
 
         await asyncio.gather(
             *(start_profile(tag) for tag in missing)
         )
+
+        if running and not configs:
+            raise NodeUnavailableError(
+                f"all {len(running)} container config(s) of {short_uuid} "
+                "unreadable; not serving an empty subscription"
+            )
 
         return configs, profiles
 
@@ -469,13 +542,28 @@ class Subscriptions:
                 )
                 return Response(status_code=503)
 
-        uris = [
-            Subscriptions.config_to_uri(
-                configs[tag],
-                "🇩🇪 DE · " + profiles[tag].name if tag in {"vm1", "vm2", "vm3"} else profiles[tag].name,
-            )
-            for tag in profiles
-        ]
+        # Per-profile isolation to the very end: a config that cannot be
+        # turned into a URI (corrupt YAML, missing keys) is dropped instead
+        # of failing the whole bundle.
+        uris = []
+        for tag in profiles:
+            if tag not in configs:
+                continue
+            config = configs[tag]
+            try:
+                uris.append(Subscriptions.config_to_uri(
+                    config,
+                    "🇩🇪 DE · " + profiles[tag].name
+                    if tag in {"vm1", "vm2", "vm3"} else profiles[tag].name,
+                ))
+            except Exception as exc:  # noqa: BLE001 - per-profile isolation
+                logging.getLogger(__name__).warning(
+                    "dropping unreadable config of %s (%s)",
+                    tag, type(exc).__name__,
+                )
+
+        if not uris:
+            return Response(status_code=503)
 
         return Response(
             content=Subscriptions.prepare_sub_text(
@@ -507,14 +595,14 @@ class Subscriptions:
         # handle's own daemon. Read-only: nothing is created or replaced.
         running, _unreachable = await Subscriptions.get_launched_tags(short_uuid)
 
-        async def load_config(handle):
-            config = await Containers.get_config_of(handle)
-            return handle, config
-
+        # Per-container isolation (same policy as ensure_profiles_running):
+        # one container's failed exec read falls back to its inspect CONFIG
+        # env, never fails the whole read-only sweep, and never recreates
+        # anything.
         loaded = await asyncio.gather(
-            *(load_config(handle) for _, handle in running)
+            *(_load_config_isolated(tag, handle) for tag, handle in running)
         )
-        configs = {tag: cfg for (tag, _), (_, cfg) in zip(running, loaded)}
+        configs = {tag: cfg for tag, cfg in loaded if cfg is not None}
 
         profiles_list = await Profiles.get_all()
         profiles = {
@@ -522,6 +610,14 @@ class Subscriptions:
             Subscriptions.profiles_for_user(profiles_list, short_uuid).items()
             if tag in configs
         }
+
+        if running and not configs:
+            # The containers were SEEN but none yielded a valid config:
+            # fail closed with 503 rather than an empty-but-200 bundle.
+            raise NodeUnavailableError(
+                f"all {len(running)} container config(s) of {short_uuid} "
+                "unreadable; not serving an empty subscription"
+            )
 
         return configs, profiles
 

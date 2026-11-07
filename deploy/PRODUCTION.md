@@ -108,6 +108,24 @@ Removing a trial from issuance requires removing its profile via the API,
 which also removes its managed containers. Dashboard "Online" means the API
 responds, not tunnel health.
 
+On 2026-11-07 the vm2 Jitsi profile moved from `meet.riddlerx.org` (BOSH HTTP502)
+to `meet.ffmuc.net`, after an isolated same-engine tunnel passed verified HTTPS
+from vm2. All seven existing vm2 engines kept their keys, room-name suffixes,
+labels and quota identity; working vm1/vm3 profiles were untouched. Both personal
+subscriptions again returned seven profiles, and native clients using the
+existing vm2 keys passed HTTPS. Clients must refresh the same subscription URL
+to obtain the new hostname. Protected snapshots are in talos-home's
+`.ignore/olcwave-production/alert-repair-20261107T114030Z/`; do not republish them.
+
+Subscription config reads isolate individual container failures. Docker exec409
+uses the same container's inspect `CONFIG` (existing key/room); unreadable or
+invalid configs are excluded without recreating their existing containers.
+Room checks and provisioning failures affect only the associated profile. A
+bundle with no valid credentials returns503, not empty200. Unreachable-node
+fail-closed, Remnawave authorization/grace, quotas and user locking are unchanged.
+Regression checks cover restart409, missing config, all-unavailable and invalid
+credentials; the restart409 case fails with503 on the previous source.
+
 Dashboard cache repair: Dashboard and Containers now both cache the
 `/containers/all_status` envelope under `containers-all`; Dashboard reads its
 `containers` field. Previously the two pages cached an array and an envelope
